@@ -4,10 +4,16 @@ import json
 import mimetypes
 import os
 import re
+import select
+import base64
+import binascii
+import io
 import secrets
 import shutil
 import subprocess
 import tempfile
+import time
+import zipfile
 from email import policy
 from email.parser import BytesParser
 from http import HTTPStatus
@@ -31,6 +37,8 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 WORK_DIR = Path(tempfile.gettempdir()) / "powerpoint-notes-summarizer"
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
+MAX_UPLOAD_FILES = 5
+CODEX_LOGIN_SESSION: dict = {}
 
 STANDARD_PROMPT = """Transform the provided detailed slide notes into concise bullet-point reminders for live presentation delivery.
 
@@ -39,7 +47,7 @@ INSTRUCTIONS:
 - Convert verbose explanations into short, memorable bullet points
 - Focus on key topics, concepts, and transitions the presenter needs to remember
 - Preserve technical terms, product names, and specific numbers/statistics
-- Keep the original slide numbering and structure
+- Preserve the original slide order and structure
 - Include any instructor notes or presenter directions in [brackets]
 - Maintain logical flow between points
 - Remove filler words and redundant explanations
@@ -48,7 +56,7 @@ INSTRUCTIONS:
 BULLET POINT GUIDELINES:
 
 
-- Keep the titles for each slide as "## Slide [number]" without any further text after the number, followed by the summarized slide notes in the next line
+- Do not include slide numbers, slide headings, or section titles in the final notes
 - DO NOT use any formatting in the output text, this text will be copied and pasted in a .txt file, avoid rich text. Do bullet point with a "- "
 - Maximum 5-10 words per bullet when possible
 - Use action verbs and keywords as memory triggers
@@ -60,35 +68,63 @@ BULLET POINT GUIDELINES:
 GOAL: Create speaking notes that allow the presenter to glance quickly and speak naturally while covering all essential content without reading verbatim."""
 
 PROVIDERS = {
-    "codex": {
-        "label": "OpenAI Codex login",
-        "shortLabel": "Codex OAuth",
-        "requiresKey": False,
-        "keyLabel": "",
-        "envKey": "",
-        "defaultModel": "gpt-5.4-mini",
-        "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.2", "gpt-5.3-codex"],
-    },
-    "openai": {
-        "label": "OpenAI API key",
-        "shortLabel": "OpenAI Key",
-        "requiresKey": True,
-        "keyLabel": "OpenAI API key",
-        "envKey": "OPENAI_API_KEY",
-        "defaultModel": "gpt-5.4-mini",
-        "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-4.1-mini", "gpt-4.1"],
-    },
-    "openrouter": {
-        "label": "OpenRouter API key",
-        "shortLabel": "OpenRouter Key",
+    "openrouter_free": {
+        "label": "OpenRouter free router",
+        "shortLabel": "OpenRouter Free",
         "requiresKey": True,
         "keyLabel": "OpenRouter API key",
         "envKey": "OPENROUTER_API_KEY",
+        "speedLabel": "free",
+        "defaultModel": "openrouter/free",
+        "models": ["openrouter/free"],
+    },
+    "codex": {
+        "label": "OpenAI Codex login",
+        "shortLabel": "OpenAI Login",
+        "requiresKey": False,
+        "keyLabel": "",
+        "envKey": "",
+        "speedLabel": "slower",
+        "defaultModel": "gpt-5.4-mini",
+        "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.2", "gpt-5.3-codex"],
+    },
+    "openrouter": {
+        "label": "OpenRouter API key",
+        "shortLabel": "OpenRouter API Key",
+        "requiresKey": True,
+        "keyLabel": "OpenRouter API key",
+        "envKey": "OPENROUTER_API_KEY",
+        "speedLabel": "faster",
         "defaultModel": "openai/gpt-5.2",
         "models": ["openai/gpt-5.2", "openai/gpt-5.1", "openai/gpt-5", "openai/gpt-4.1"],
     },
+    "openai": {
+        "label": "OpenAI API key",
+        "shortLabel": "OpenAI API Key",
+        "requiresKey": True,
+        "keyLabel": "OpenAI API key",
+        "envKey": "OPENAI_API_KEY",
+        "speedLabel": "faster",
+        "defaultModel": "gpt-5.4-mini",
+        "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-4.1-mini", "gpt-4.1"],
+    },
 }
 DEFAULT_PROVIDER = "codex"
+
+MODEL_DESCRIPTIONS = {
+    "openrouter/free": "Free route, lower quality, variable availability",
+    "gpt-5.4-mini": "Fast, lower cost, good for most decks",
+    "gpt-5.4": "Higher quality, balanced speed",
+    "gpt-5.5": "Highest quality, slower",
+    "gpt-5.2": "Strong quality, dependable reasoning",
+    "gpt-5.3-codex": "Codex-tuned, useful with OpenAI login",
+    "gpt-4.1-mini": "Fast legacy option",
+    "gpt-4.1": "High quality legacy option",
+    "openai/gpt-5.2": "High quality through OpenRouter",
+    "openai/gpt-5.1": "High quality through OpenRouter",
+    "openai/gpt-5": "High quality through OpenRouter",
+    "openai/gpt-4.1": "High quality legacy route",
+}
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -97,7 +133,10 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/download/"):
-            self._download(parsed.path.rsplit("/", 1)[-1])
+            self._download(parsed.path.removeprefix("/api/download/"))
+            return
+        if parsed.path == "/api/codex-oauth/status":
+            self._json(codex_oauth_status())
             return
         self._serve_static(parsed.path)
 
@@ -108,6 +147,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._analyze()
             elif parsed.path == "/api/summarize":
                 self._summarize()
+            elif parsed.path == "/api/codex-oauth/start":
+                self._start_codex_oauth()
             elif parsed.path == "/api/cancel":
                 self._cancel()
             else:
@@ -119,6 +160,10 @@ class AppHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json({"error": f"Unexpected server error: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
@@ -127,57 +172,75 @@ class AppHandler(BaseHTTPRequestHandler):
         if content_length <= 0:
             raise ValueError("Upload a PowerPoint file.")
         if content_length > MAX_UPLOAD_BYTES:
-            raise ValueError("The uploaded file is larger than 80 MB.")
+            raise ValueError("Upload up to 5 files, 80 MB total.")
 
         body = self.rfile.read(content_length)
         fields = _parse_multipart(self.headers.get("Content-Type", ""), body)
-        upload = fields.get("file")
-        if not upload or not upload.get("content"):
+        uploads = [item for item in fields.get("file", []) if item.get("content")]
+        if not uploads:
             raise ValueError("Upload a PowerPoint file.")
-
-        filename = _safe_filename(upload.get("filename") or "presentation.pptx")
-        suffix = Path(filename).suffix.lower()
-        if suffix not in {".pptx", ".ppt"}:
-            raise ValueError("Only .pptx and .ppt files are supported.")
+        if len(uploads) > MAX_UPLOAD_FILES:
+            raise ValueError(f"Upload up to {MAX_UPLOAD_FILES} PowerPoint files at once.")
 
         session_id = secrets.token_urlsafe(16)
         session_dir = WORK_DIR / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        input_path = session_dir / filename
-        input_path.write_bytes(upload["content"])
 
-        pptx_path = prepare_powerpoint(input_path, session_dir)
-        inspection = inspect_pptx(pptx_path)
-        output_filename = f"{Path(filename).stem}-summarized-notes.pptx"
+        presentations = []
+        for index, upload in enumerate(uploads, start=1):
+            filename = _safe_filename(upload.get("filename") or f"presentation-{index}.pptx")
+            suffix = Path(filename).suffix.lower()
+            if suffix not in {".pptx", ".ppt"}:
+                raise ValueError("Only .pptx and .ppt files are supported.")
+
+            deck_dir = session_dir / f"presentation-{index}"
+            deck_dir.mkdir(parents=True, exist_ok=True)
+            input_path = deck_dir / filename
+            input_path.write_bytes(upload["content"])
+
+            pptx_path = prepare_powerpoint(input_path, deck_dir)
+            inspection = inspect_pptx(pptx_path)
+            output_filename = f"{Path(filename).stem}-summarized-notes.pptx"
+            presentations.append(
+                {
+                    "id": str(index),
+                    "filename": filename,
+                    "input_path": str(input_path),
+                    "pptx_path": str(pptx_path),
+                    "output_path": str(deck_dir / output_filename),
+                    "output_filename": output_filename,
+                    "inspection": inspection,
+                }
+            )
+
         session = {
             "id": session_id,
-            "filename": filename,
-            "input_path": str(input_path),
-            "pptx_path": str(pptx_path),
-            "output_path": str(session_dir / output_filename),
-            "output_filename": output_filename,
-            "inspection": inspection,
+            "presentations": presentations,
         }
         dump_session(session_dir / "session.json", session)
+        public_presentations = [_public_presentation(presentation) for presentation in presentations]
 
         self._json(
             {
                 "sessionId": session_id,
-                "filename": filename,
-                "slideCount": inspection["slide_count"],
-                "noteCount": inspection["note_count"],
-                "noteSlideCount": inspection["note_slide_count"],
-                "writableNoteCount": inspection["writable_note_count"],
-                "slides": _public_slides(inspection["slides"]),
+                "presentationCount": len(presentations),
+                "filename": presentations[0]["filename"] if len(presentations) == 1 else f"{len(presentations)} presentations",
+                "slideCount": sum(item["slideCount"] for item in public_presentations),
+                "noteCount": sum(item["noteCount"] for item in public_presentations),
+                "noteSlideCount": sum(item["noteSlideCount"] for item in public_presentations),
+                "writableNoteCount": sum(item["writableNoteCount"] for item in public_presentations),
+                "presentations": public_presentations,
                 "prompt": STANDARD_PROMPT,
                 "provider": DEFAULT_PROVIDER,
                 "providers": _public_providers(),
+                "limits": {"maxFiles": MAX_UPLOAD_FILES, "maxTotalMb": MAX_UPLOAD_BYTES // (1024 * 1024)},
             }
         )
 
     def _summarize(self) -> None:
         payload = self._read_json()
         session_id = _safe_id(payload.get("sessionId", ""))
+        presentation_id = _safe_id(str(payload.get("presentationId", "") or ""))
         provider = (payload.get("provider") or DEFAULT_PROVIDER).strip()
         provider_config = PROVIDERS.get(provider)
         if not provider_config:
@@ -195,10 +258,11 @@ class AppHandler(BaseHTTPRequestHandler):
         if not session_path.exists():
             raise ValueError("This upload session is no longer available.")
         session = load_session(session_path)
-        slides = session["inspection"]["slides"]
+        presentation = _presentation_for_request(session, presentation_id or None)
+        slides = presentation["inspection"]["slides"]
         slides_with_notes = [slide for slide in slides if slide.get("notes", "").strip() and slide.get("can_write")]
         if not slides_with_notes:
-            raise ValueError("No writable speaker notes were found in this deck.")
+            raise ValueError("No writable speaker notes were found in this presentation.")
 
         notes_payload = _format_notes_for_model(slides_with_notes)
         model_input = _build_model_input(prompt, notes_payload, [slide["number"] for slide in slides_with_notes])
@@ -219,17 +283,20 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValueError("The model response could not be matched back to slide numbers.")
 
         write_result = write_summarized_notes(
-            Path(session["pptx_path"]),
-            Path(session["output_path"]),
+            Path(presentation["pptx_path"]),
+            Path(presentation["output_path"]),
             slides,
             summaries_by_slide,
         )
         warnings.extend(write_result["warnings"])
-        session["summary"] = {
+        summary = {
             "model": model,
             "updated_count": write_result["updated_count"],
             "warnings": warnings,
         }
+        presentation["summary"] = summary
+        if "presentations" not in session:
+            session["summary"] = summary
         dump_session(session_path, session)
 
         comparison = []
@@ -247,14 +314,18 @@ class AppHandler(BaseHTTPRequestHandler):
         self._json(
             {
                 "sessionId": session_id,
-                "filename": session["filename"],
+                "presentationId": presentation["id"],
+                "filename": presentation["filename"],
                 "provider": provider,
                 "updatedCount": write_result["updated_count"],
                 "warnings": warnings,
-                "downloadUrl": f"/api/download/{session_id}",
+                "downloadUrl": f"/api/download/{session_id}/{presentation['id']}",
                 "comparison": comparison,
             }
         )
+
+    def _start_codex_oauth(self) -> None:
+        self._json(start_codex_oauth())
 
     def _cancel(self) -> None:
         payload = self._read_json()
@@ -263,14 +334,24 @@ class AppHandler(BaseHTTPRequestHandler):
             shutil.rmtree(WORK_DIR / session_id, ignore_errors=True)
         self._json({"ok": True})
 
-    def _download(self, session_id: str) -> None:
-        session_id = _safe_id(unquote(session_id))
+    def _download(self, download_path: str) -> None:
+        parts = [part for part in unquote(download_path).split("/") if part]
+        if not parts or len(parts) > 2:
+            self._json({"error": "Download not found."}, HTTPStatus.NOT_FOUND)
+            return
+        session_id = _safe_id(parts[0])
+        presentation_id = _safe_id(parts[1]) if len(parts) == 2 else ""
         session_path = WORK_DIR / session_id / "session.json"
         if not session_path.exists():
             self._json({"error": "Download not found."}, HTTPStatus.NOT_FOUND)
             return
         session = load_session(session_path)
-        output_path = Path(session["output_path"])
+        if not presentation_id and len(_session_presentations(session)) > 1:
+            self._download_zip(session)
+            return
+
+        presentation = _presentation_for_request(session, presentation_id or None)
+        output_path = Path(presentation["output_path"])
         if not output_path.exists():
             self._json({"error": "The summarized PowerPoint has not been created yet."}, HTTPStatus.NOT_FOUND)
             return
@@ -278,7 +359,36 @@ class AppHandler(BaseHTTPRequestHandler):
         data = output_path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
-        self.send_header("Content-Disposition", f'attachment; filename="{session["output_filename"]}"')
+        self.send_header("Content-Disposition", f'attachment; filename="{presentation["output_filename"]}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _download_zip(self, session: dict) -> None:
+        archive_buffer = io.BytesIO()
+        written_names: set[str] = set()
+        added_count = 0
+        with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for presentation in _session_presentations(session):
+                output_path = Path(presentation["output_path"])
+                if not output_path.exists():
+                    continue
+                archive_name = presentation["output_filename"]
+                if archive_name in written_names:
+                    stem = Path(archive_name).stem
+                    archive_name = f"{stem}-{presentation['id']}.pptx"
+                written_names.add(archive_name)
+                archive.write(output_path, archive_name)
+                added_count += 1
+
+        if not added_count:
+            self._json({"error": "No summarized PowerPoints have been created yet."}, HTTPStatus.NOT_FOUND)
+            return
+
+        data = archive_buffer.getvalue()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", 'attachment; filename="summarized-presentations.zip"')
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -322,10 +432,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def _call_inference_provider(provider: str, model: str, model_input: str, api_key: str) -> str:
     if provider == "codex":
+        if not _codex_login_is_connected():
+            raise ValueError("Connect your OpenAI account with OpenAI login before summarizing.")
         return _call_codex(model, model_input)
     if provider == "openai":
         return _call_openai_api(model, model_input, api_key)
-    if provider == "openrouter":
+    if provider in {"openrouter", "openrouter_free"}:
         return _call_openrouter(model, model_input, api_key)
     raise ValueError("Choose a valid inference provider.")
 
@@ -350,8 +462,6 @@ def _call_codex(model: str, model_input: str) -> str:
         "--ignore-rules",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--color",
         "never",
         "--output-last-message",
@@ -385,6 +495,273 @@ def _call_codex(model: str, model_input: str) -> str:
         raise ValueError("Codex inference timed out.") from exc
     finally:
         output_path.unlink(missing_ok=True)
+
+
+def start_codex_oauth() -> dict:
+    if _codex_login_is_connected():
+        return _connected_codex_payload()
+
+    existing = CODEX_LOGIN_SESSION.get("process")
+    if existing and existing.poll() is None:
+        return {
+            "status": "pending",
+            "authUrl": CODEX_LOGIN_SESSION.get("auth_url"),
+            "userCode": CODEX_LOGIN_SESSION.get("user_code"),
+        }
+
+    codex_bin = os.environ.get("CODEX_BIN") or shutil.which("codex")
+    app_bundle_codex = Path("/Applications/Codex.app/Contents/Resources/codex")
+    if not codex_bin and app_bundle_codex.exists():
+        codex_bin = str(app_bundle_codex)
+    if not codex_bin:
+        raise ValueError("Codex CLI was not found. Install Codex or set CODEX_BIN.")
+
+    process = subprocess.Popen(
+        [codex_bin, "login", "--device-auth"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    output = _read_available_process_output(process, timeout_seconds=10)
+    auth_url = _first_match(r"https://auth\.openai\.com/\S+", output)
+    user_code = _first_match(r"\b[A-Z0-9]{4,5}-[A-Z0-9]{4,8}\b", output)
+
+    if not auth_url or not user_code:
+        process.terminate()
+        detail = _clean_terminal_text(output).strip() or "Codex did not return an OAuth device code."
+        raise ValueError(detail)
+
+    CODEX_LOGIN_SESSION.clear()
+    CODEX_LOGIN_SESSION.update(
+        {
+            "process": process,
+            "auth_url": auth_url,
+            "user_code": user_code,
+            "output": output,
+        }
+    )
+
+    return {"status": "pending", "authUrl": auth_url, "userCode": user_code}
+
+
+def codex_oauth_status() -> dict:
+    process = CODEX_LOGIN_SESSION.get("process")
+    if process and process.poll() is None:
+        return {
+            "status": "pending",
+            "authUrl": CODEX_LOGIN_SESSION.get("auth_url"),
+            "userCode": CODEX_LOGIN_SESSION.get("user_code"),
+        }
+
+    if process:
+        output = CODEX_LOGIN_SESSION.get("output", "")
+        output += _read_available_process_output(process, timeout_seconds=0)
+        return_code = process.poll()
+        CODEX_LOGIN_SESSION.clear()
+        if return_code == 0:
+            return _connected_codex_payload()
+        detail = _clean_terminal_text(output).strip() or "OpenAI account connection did not complete."
+        return {"status": "error", "error": detail}
+
+    if _codex_login_is_connected():
+        return _connected_codex_payload()
+    return {"status": "disconnected"}
+
+
+def _connected_codex_payload() -> dict:
+    return {"status": "connected", "account": _codex_account_info()}
+
+
+def _codex_login_is_connected() -> bool:
+    connected, _ = _codex_login_status()
+    return connected
+
+
+def _codex_login_status() -> tuple[bool, str]:
+    codex_bin = os.environ.get("CODEX_BIN") or shutil.which("codex")
+    app_bundle_codex = Path("/Applications/Codex.app/Contents/Resources/codex")
+    if not codex_bin and app_bundle_codex.exists():
+        codex_bin = str(app_bundle_codex)
+    if not codex_bin:
+        return False, ""
+    try:
+        result = subprocess.run(
+            [codex_bin, "login", "status"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    status_text = _clean_login_status_text(result.stdout + result.stderr)
+    return result.returncode == 0 and "Logged in" in status_text, status_text
+
+
+def _codex_account_info() -> dict:
+    connected, status_text = _codex_login_status()
+    info: dict[str, object] = {}
+    if status_text:
+        info["statusText"] = status_text
+    if not connected:
+        return info
+
+    auth_path = Path.home() / ".codex" / "auth.json"
+    try:
+        auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return info
+
+    auth_mode = auth_data.get("auth_mode")
+    if isinstance(auth_mode, str) and auth_mode:
+        info["authMode"] = _humanize_compact_label(auth_mode)
+    last_refresh = auth_data.get("last_refresh")
+    if isinstance(last_refresh, str) and last_refresh:
+        info["lastRefresh"] = last_refresh
+
+    tokens = auth_data.get("tokens")
+    if not isinstance(tokens, dict):
+        tokens = {}
+    id_claims = _decode_jwt_claims(tokens.get("id_token"))
+    access_claims = _decode_jwt_claims(tokens.get("access_token"))
+    auth_claims = _merge_dicts(
+        id_claims.get("https://api.openai.com/auth"),
+        access_claims.get("https://api.openai.com/auth"),
+    )
+    profile_claims = _merge_dicts(
+        id_claims.get("https://api.openai.com/profile"),
+        access_claims.get("https://api.openai.com/profile"),
+    )
+
+    for key, value in {
+        "name": id_claims.get("name"),
+        "email": profile_claims.get("email") or id_claims.get("email"),
+        "accountId": tokens.get("account_id") or auth_claims.get("chatgpt_account_id"),
+        "plan": _humanize_compact_label(auth_claims.get("chatgpt_plan_type")),
+        "subscriptionActiveUntil": auth_claims.get("chatgpt_subscription_active_until"),
+        "subscriptionLastChecked": auth_claims.get("chatgpt_subscription_last_checked"),
+        "authProvider": _humanize_compact_label(id_claims.get("auth_provider")),
+    }.items():
+        if isinstance(value, str) and value:
+            info[key] = value
+
+    email_verified = profile_claims.get("email_verified", id_claims.get("email_verified"))
+    if isinstance(email_verified, bool):
+        info["emailVerified"] = email_verified
+
+    organization = _default_codex_organization(auth_claims.get("organizations"))
+    if organization:
+        info["organization"] = organization
+
+    return info
+
+
+def _merge_dicts(*values: object) -> dict:
+    merged: dict = {}
+    for value in values:
+        if isinstance(value, dict):
+            merged.update(value)
+    return merged
+
+
+def _decode_jwt_claims(value: object) -> dict:
+    if not isinstance(value, str) or value.count(".") < 2:
+        return {}
+    try:
+        payload = value.split(".")[1]
+        payload += "=" * ((4 - len(payload) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        claims = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _default_codex_organization(value: object) -> dict | None:
+    if not isinstance(value, list):
+        return None
+    organizations = [item for item in value if isinstance(item, dict)]
+    if not organizations:
+        return None
+    organization = next((item for item in organizations if item.get("is_default")), organizations[0])
+    title = organization.get("title")
+    role = organization.get("role")
+    if not isinstance(title, str) or not title:
+        return None
+    result = {"title": title}
+    if isinstance(role, str) and role:
+        result["role"] = _humanize_compact_label(role)
+    return result
+
+
+def _humanize_compact_label(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    known = {
+        "chatgpt": "ChatGPT",
+        "pro": "Pro",
+        "plus": "Plus",
+        "team": "Team",
+        "enterprise": "Enterprise",
+        "free": "Free",
+        "apple": "Apple",
+        "google": "Google",
+        "microsoft": "Microsoft",
+    }
+    normalized = value.strip().lower()
+    if normalized in known:
+        return known[normalized]
+    return " ".join(part.capitalize() for part in re.split(r"[_\s-]+", value.strip()) if part)
+
+
+def _clean_login_status_text(text: str) -> str:
+    clean = _clean_terminal_text(text)
+    lines = [
+        line.strip()
+        for line in clean.splitlines()
+        if line.strip() and not line.strip().startswith("WARNING:")
+    ]
+    return "\n".join(lines)
+
+
+def _read_available_process_output(process: subprocess.Popen, timeout_seconds: float) -> str:
+    if process.stdout is None:
+        return ""
+
+    chunks: list[str] = []
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if timeout_seconds > 0 and remaining <= 0:
+            break
+        wait_time = max(0, min(0.2, remaining)) if timeout_seconds > 0 else 0
+        readable, _, _ = select.select([process.stdout], [], [], wait_time)
+        if not readable:
+            if timeout_seconds == 0:
+                break
+            continue
+        line = process.stdout.readline()
+        if not line:
+            break
+        chunks.append(line)
+        combined = "".join(chunks)
+        if "https://auth.openai.com/" in combined and _first_match(r"\b[A-Z0-9]{4,5}-[A-Z0-9]{4,8}\b", combined):
+            break
+    return "".join(chunks)
+
+
+def _first_match(pattern: str, text: str) -> str | None:
+    clean = _clean_terminal_text(text)
+    match = re.search(pattern, clean)
+    return match.group(0) if match else None
+
+
+def _clean_terminal_text(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _call_openai_api(model: str, model_input: str, api_key: str) -> str:
@@ -467,6 +844,7 @@ Return only the requested slide-note text.
 Return exactly one section for each slide number listed here: {slide_list}.
 Do not add commentary before or after the slide sections.
 Keep each section title exactly as "## Slide [number]".
+Use those section titles only so the app can match output back to slides; do not repeat slide numbers or headings inside the note text.
 
 ORIGINAL SLIDE NOTES:
 
@@ -503,29 +881,78 @@ def _parse_slide_sections(text: str, expected_numbers: list[int]) -> dict[int, s
 
 
 def _normalize_summary(number: int, body: str) -> str:
-    clean_body = "\n".join(line.rstrip() for line in body.strip().splitlines() if line.strip())
-    if clean_body:
-        return f"## Slide {number}\n{clean_body}"
-    return f"## Slide {number}"
+    lines = [line.rstrip() for line in body.strip().splitlines() if line.strip()]
+    while lines and _is_slide_heading(lines[0]):
+        lines.pop(0)
+    return "\n".join(lines)
 
 
-def _parse_multipart(content_type: str, body: bytes) -> dict[str, dict]:
+def _is_slide_heading(line: str) -> bool:
+    return bool(re.fullmatch(r"\s*(?:#{1,6}\s*)?Slide\s+\d+\s*:?\s*", line, flags=re.IGNORECASE))
+
+
+def _session_presentations(session: dict) -> list[dict]:
+    presentations = session.get("presentations")
+    if isinstance(presentations, list):
+        return presentations
+    return [
+        {
+            "id": "1",
+            "filename": session["filename"],
+            "input_path": session["input_path"],
+            "pptx_path": session["pptx_path"],
+            "output_path": session["output_path"],
+            "output_filename": session["output_filename"],
+            "inspection": session["inspection"],
+            "summary": session.get("summary"),
+        }
+    ]
+
+
+def _presentation_for_request(session: dict, presentation_id: str | None) -> dict:
+    presentations = _session_presentations(session)
+    if not presentations:
+        raise ValueError("This upload session has no presentations.")
+    if not presentation_id:
+        return presentations[0]
+    for presentation in presentations:
+        if presentation.get("id") == presentation_id:
+            return presentation
+    raise ValueError("Presentation not found.")
+
+
+def _parse_multipart(content_type: str, body: bytes) -> dict[str, list[dict]]:
     if "multipart/form-data" not in content_type:
         raise ValueError("Expected a multipart upload.")
     message = BytesParser(policy=policy.default).parsebytes(
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
     )
-    fields: dict[str, dict] = {}
+    fields: dict[str, list[dict]] = {}
     for part in message.iter_parts():
         name = part.get_param("name", header="content-disposition")
         if not name:
             continue
-        fields[name] = {
-            "filename": part.get_filename(),
-            "content": part.get_payload(decode=True),
-            "content_type": part.get_content_type(),
-        }
+        fields.setdefault(name, []).append(
+            {
+                "filename": part.get_filename(),
+                "content": part.get_payload(decode=True),
+                "content_type": part.get_content_type(),
+            }
+        )
     return fields
+
+
+def _public_presentation(presentation: dict) -> dict:
+    inspection = presentation["inspection"]
+    return {
+        "id": presentation["id"],
+        "filename": presentation["filename"],
+        "slideCount": inspection["slide_count"],
+        "noteCount": inspection["note_count"],
+        "noteSlideCount": inspection["note_slide_count"],
+        "writableNoteCount": inspection["writable_note_count"],
+        "slides": _public_slides(inspection["slides"]),
+    }
 
 
 def _public_slides(slides: list[dict]) -> list[dict]:
@@ -549,8 +976,10 @@ def _public_providers() -> list[dict]:
             "requiresKey": config["requiresKey"],
             "keyLabel": config["keyLabel"],
             "envKey": config["envKey"],
+            "speedLabel": config["speedLabel"],
             "defaultModel": config["defaultModel"],
             "models": config["models"],
+            "modelDescriptions": {model: MODEL_DESCRIPTIONS.get(model, "") for model in config["models"]},
         }
         for provider_id, config in PROVIDERS.items()
     ]
