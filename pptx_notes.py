@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import copy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -282,6 +283,7 @@ def _replace_notes_text(xml_bytes: bytes, notes: str) -> tuple[bytes, bool]:
     if tx_body is None:
         return xml_bytes, False
 
+    paragraph_template = _notes_paragraph_template(tx_body)
     for child in list(tx_body):
         if child.tag == f"{{{A_NS}}}p":
             tx_body.remove(child)
@@ -291,9 +293,19 @@ def _replace_notes_text(xml_bytes: bytes, notes: str) -> tuple[bytes, bool]:
         lines = [""]
 
     for line in lines:
-        tx_body.append(_paragraph(line))
+        tx_body.append(_paragraph(line, paragraph_template))
 
     return ET.tostring(root, encoding="utf-8", xml_declaration=True), True
+
+
+def _notes_paragraph_template(tx_body: ET.Element) -> ET.Element | None:
+    paragraphs = [child for child in tx_body if child.tag == f"{{{A_NS}}}p"]
+    if not paragraphs:
+        return None
+    for paragraph in paragraphs:
+        if paragraph.find("a:r/a:rPr", NS) is not None or paragraph.find("a:pPr", NS) is not None:
+            return paragraph
+    return paragraphs[0]
 
 
 def _find_notes_tx_body(root: ET.Element) -> ET.Element | None:
@@ -324,14 +336,28 @@ def _find_notes_tx_body(root: ET.Element) -> ET.Element | None:
     return fallback_candidates[0] if fallback_candidates else None
 
 
-def _paragraph(text: str) -> ET.Element:
-    paragraph = ET.Element(f"{{{A_NS}}}p")
+def _paragraph(text: str, template: ET.Element | None = None) -> ET.Element:
+    paragraph = ET.Element(f"{{{A_NS}}}p", dict(template.attrib) if template is not None else {})
+    if template is not None:
+        paragraph_properties = template.find("a:pPr", NS)
+        if paragraph_properties is not None:
+            paragraph.append(copy.deepcopy(paragraph_properties))
+
     run = ET.SubElement(paragraph, f"{{{A_NS}}}r")
-    ET.SubElement(run, f"{{{A_NS}}}rPr", {"lang": "en-US", "sz": "1200"})
+    if template is not None:
+        run_properties = template.find("a:r/a:rPr", NS)
+        if run_properties is not None:
+            run.append(copy.deepcopy(run_properties))
+
     text_node = ET.SubElement(run, f"{{{A_NS}}}t")
     text_node.text = text
     if text != text.strip() or "  " in text:
         text_node.set(f"{{{XML_NS}}}space", "preserve")
+
+    if template is not None:
+        end_properties = template.find("a:endParaRPr", NS)
+        if end_properties is not None:
+            paragraph.append(copy.deepcopy(end_properties))
     return paragraph
 
 

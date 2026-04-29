@@ -12,6 +12,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from email import policy
@@ -33,12 +34,34 @@ from pptx_notes import (
 )
 
 
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 ROOT = Path(__file__).resolve().parent
+_load_env_file(ROOT / ".env")
 STATIC_DIR = ROOT / "static"
 WORK_DIR = Path(tempfile.gettempdir()) / "powerpoint-notes-summarizer"
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_UPLOAD_FILES = 5
 CODEX_LOGIN_SESSION: dict = {}
+SUMMARIZE_JOBS: dict[str, dict] = {}
+SUMMARIZE_JOBS_LOCK = threading.Lock()
+SUMMARIZE_JOB_RETENTION_SECONDS = 60 * 60
 
 STANDARD_PROMPT = """Transform the provided detailed slide notes into concise bullet-point reminders for live presentation delivery.
 
@@ -68,15 +91,15 @@ BULLET POINT GUIDELINES:
 GOAL: Create speaking notes that allow the presenter to glance quickly and speak naturally while covering all essential content without reading verbatim."""
 
 PROVIDERS = {
-    "openrouter_free": {
-        "label": "OpenRouter free router",
-        "shortLabel": "OpenRouter Free",
+    "gemini": {
+        "label": "Google Gemini",
+        "shortLabel": "Gemini",
         "requiresKey": True,
-        "keyLabel": "OpenRouter API key",
-        "envKey": "OPENROUTER_API_KEY",
+        "keyLabel": "Gemini API key",
+        "envKey": "GEMINI_API_KEY",
         "speedLabel": "free",
-        "defaultModel": "openrouter/free",
-        "models": ["openrouter/free"],
+        "defaultModel": "gemini-flash-latest",
+        "models": ["gemini-flash-latest"],
     },
     "codex": {
         "label": "OpenAI Codex login",
@@ -88,19 +111,9 @@ PROVIDERS = {
         "defaultModel": "gpt-5.4-mini",
         "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.2", "gpt-5.3-codex"],
     },
-    "openrouter": {
-        "label": "OpenRouter API key",
-        "shortLabel": "OpenRouter API Key",
-        "requiresKey": True,
-        "keyLabel": "OpenRouter API key",
-        "envKey": "OPENROUTER_API_KEY",
-        "speedLabel": "faster",
-        "defaultModel": "openai/gpt-5.2",
-        "models": ["openai/gpt-5.2", "openai/gpt-5.1", "openai/gpt-5", "openai/gpt-4.1"],
-    },
     "openai": {
         "label": "OpenAI API key",
-        "shortLabel": "OpenAI API Key",
+        "shortLabel": "OpenAI API",
         "requiresKey": True,
         "keyLabel": "OpenAI API key",
         "envKey": "OPENAI_API_KEY",
@@ -108,11 +121,21 @@ PROVIDERS = {
         "defaultModel": "gpt-5.4-mini",
         "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-4.1-mini", "gpt-4.1"],
     },
+    "openrouter": {
+        "label": "OpenRouter API key",
+        "shortLabel": "OpenRouter API",
+        "requiresKey": True,
+        "keyLabel": "OpenRouter API key",
+        "envKey": "OPENROUTER_API_KEY",
+        "speedLabel": "faster",
+        "defaultModel": "openai/gpt-5.2",
+        "models": ["openai/gpt-5.2", "openai/gpt-5.1", "openai/gpt-5", "openai/gpt-4.1"],
+    },
 }
 DEFAULT_PROVIDER = "codex"
 
 MODEL_DESCRIPTIONS = {
-    "openrouter/free": "Free route, lower quality, variable availability",
+    "gemini-flash-latest": "Free Gemini Flash route",
     "gpt-5.4-mini": "Fast, lower cost, good for most decks",
     "gpt-5.4": "Higher quality, balanced speed",
     "gpt-5.5": "Highest quality, slower",
@@ -135,6 +158,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/download/"):
             self._download(parsed.path.removeprefix("/api/download/"))
             return
+        if parsed.path.startswith("/api/summarize/progress/"):
+            self._summarize_progress(parsed.path.removeprefix("/api/summarize/progress/"))
+            return
         if parsed.path == "/api/codex-oauth/status":
             self._json(codex_oauth_status())
             return
@@ -147,6 +173,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._analyze()
             elif parsed.path == "/api/summarize":
                 self._summarize()
+            elif parsed.path == "/api/summarize/start":
+                self._start_summarize_job()
             elif parsed.path == "/api/codex-oauth/start":
                 self._start_codex_oauth()
             elif parsed.path == "/api/cancel":
@@ -239,90 +267,36 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _summarize(self) -> None:
         payload = self._read_json()
-        session_id = _safe_id(payload.get("sessionId", ""))
-        presentation_id = _safe_id(str(payload.get("presentationId", "") or ""))
-        provider = (payload.get("provider") or DEFAULT_PROVIDER).strip()
-        provider_config = PROVIDERS.get(provider)
-        if not provider_config:
-            raise ValueError("Choose a valid inference provider.")
-        model = (payload.get("model") or provider_config["defaultModel"]).strip()
-        prompt = (payload.get("prompt") or STANDARD_PROMPT).strip()
-        api_key = (payload.get("apiKey") or "").strip()
-        if not model:
-            raise ValueError("Choose a model.")
-        if not prompt:
-            raise ValueError("Add a summarization prompt.")
+        self._json(_summarize_payload(payload))
 
-        session_dir = WORK_DIR / session_id
-        session_path = session_dir / "session.json"
-        if not session_path.exists():
-            raise ValueError("This upload session is no longer available.")
-        session = load_session(session_path)
-        presentation = _presentation_for_request(session, presentation_id or None)
-        slides = presentation["inspection"]["slides"]
-        slides_with_notes = [slide for slide in slides if slide.get("notes", "").strip() and slide.get("can_write")]
-        if not slides_with_notes:
-            raise ValueError("No writable speaker notes were found in this presentation.")
-
-        notes_payload = _format_notes_for_model(slides_with_notes)
-        model_input = _build_model_input(prompt, notes_payload, [slide["number"] for slide in slides_with_notes])
-        model_text = _call_inference_provider(provider, model, model_input, api_key)
-        parsed = _parse_slide_sections(model_text, [slide["number"] for slide in slides_with_notes])
-
-        summaries_by_slide: dict[int, str] = {}
-        warnings: list[str] = []
-        for slide in slides_with_notes:
-            number = slide["number"]
-            summary = parsed.get(number)
-            if summary:
-                summaries_by_slide[number] = summary
-            else:
-                warnings.append(f"Slide {number} was not returned by the model and was left unchanged.")
-
-        if not summaries_by_slide:
-            raise ValueError("The model response could not be matched back to slide numbers.")
-
-        write_result = write_summarized_notes(
-            Path(presentation["pptx_path"]),
-            Path(presentation["output_path"]),
-            slides,
-            summaries_by_slide,
+    def _start_summarize_job(self) -> None:
+        _cleanup_summarize_jobs()
+        payload = self._read_json()
+        job_id = secrets.token_urlsafe(16)
+        _update_summarize_job(
+            job_id,
+            status="queued",
+            percent=0,
+            title="Queued",
+            detail="Waiting to start",
         )
-        warnings.extend(write_result["warnings"])
-        summary = {
-            "model": model,
-            "updated_count": write_result["updated_count"],
-            "warnings": warnings,
-        }
-        presentation["summary"] = summary
-        if "presentations" not in session:
-            session["summary"] = summary
-        dump_session(session_path, session)
+        thread = threading.Thread(target=_run_summarize_job, args=(job_id, payload), daemon=True)
+        thread.start()
+        self._json({"jobId": job_id})
 
-        comparison = []
-        for slide in slides_with_notes:
-            number = slide["number"]
-            comparison.append(
-                {
-                    "number": number,
-                    "originalNotes": slide.get("notes", ""),
-                    "summarizedNotes": summaries_by_slide.get(number, ""),
-                    "changed": number in summaries_by_slide,
-                }
-            )
-
-        self._json(
-            {
-                "sessionId": session_id,
-                "presentationId": presentation["id"],
-                "filename": presentation["filename"],
-                "provider": provider,
-                "updatedCount": write_result["updated_count"],
-                "warnings": warnings,
-                "downloadUrl": f"/api/download/{session_id}/{presentation['id']}",
-                "comparison": comparison,
-            }
-        )
+    def _summarize_progress(self, job_id: str) -> None:
+        try:
+            safe_job_id = _safe_id(job_id)
+        except ValueError:
+            self._json({"error": "Summarization job not found."}, HTTPStatus.NOT_FOUND)
+            return
+        with SUMMARIZE_JOBS_LOCK:
+            job = SUMMARIZE_JOBS.get(safe_job_id)
+            public_job = dict(job) if job else None
+        if not public_job:
+            self._json({"error": "Summarization job not found."}, HTTPStatus.NOT_FOUND)
+            return
+        self._json(public_job)
 
     def _start_codex_oauth(self) -> None:
         self._json(start_codex_oauth())
@@ -430,6 +404,156 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _run_summarize_job(job_id: str, payload: dict) -> None:
+    def progress(percent: int, title: str, detail: str) -> None:
+        _update_summarize_job(
+            job_id,
+            status="running",
+            percent=percent,
+            title=title,
+            detail=detail,
+        )
+
+    try:
+        result = _summarize_payload(payload, progress)
+        _update_summarize_job(
+            job_id,
+            status="complete",
+            percent=100,
+            title="Complete",
+            detail="Deck ready to download",
+            result=result,
+        )
+    except Exception as exc:
+        _update_summarize_job(
+            job_id,
+            status="error",
+            title="Summarization failed",
+            detail=str(exc),
+            error=str(exc),
+        )
+
+
+def _update_summarize_job(job_id: str, **updates: object) -> None:
+    with SUMMARIZE_JOBS_LOCK:
+        job = SUMMARIZE_JOBS.setdefault(job_id, {"jobId": job_id})
+        job.update(updates)
+        job["jobId"] = job_id
+        job["updatedAt"] = time.time()
+
+
+def _cleanup_summarize_jobs() -> None:
+    cutoff = time.time() - SUMMARIZE_JOB_RETENTION_SECONDS
+    with SUMMARIZE_JOBS_LOCK:
+        expired = [
+            job_id
+            for job_id, job in SUMMARIZE_JOBS.items()
+            if job.get("status") in {"complete", "error"} and float(job.get("updatedAt", 0)) < cutoff
+        ]
+        for job_id in expired:
+            SUMMARIZE_JOBS.pop(job_id, None)
+
+
+def _emit_progress(progress: object, percent: int, title: str, detail: str) -> None:
+    if callable(progress):
+        progress(percent, title, detail)
+
+
+def _summarize_payload(payload: dict, progress: object = None) -> dict:
+    _emit_progress(progress, 4, "Loading presentation", "Opening upload session")
+    session_id = _safe_id(payload.get("sessionId", ""))
+    presentation_id = _safe_id(str(payload.get("presentationId", "") or ""))
+    provider = (payload.get("provider") or DEFAULT_PROVIDER).strip()
+    provider_config = PROVIDERS.get(provider)
+    if not provider_config:
+        raise ValueError("Choose a valid inference provider.")
+    provider_label = provider_config["shortLabel"]
+    model = (payload.get("model") or provider_config["defaultModel"]).strip()
+    prompt = (payload.get("prompt") or STANDARD_PROMPT).strip()
+    api_key = (payload.get("apiKey") or "").strip()
+    if not model:
+        raise ValueError("Choose a model.")
+    if not prompt:
+        raise ValueError("Add a summarization prompt.")
+
+    session_dir = WORK_DIR / session_id
+    session_path = session_dir / "session.json"
+    if not session_path.exists():
+        raise ValueError("This upload session is no longer available.")
+    session = load_session(session_path)
+    presentation = _presentation_for_request(session, presentation_id or None)
+    _emit_progress(progress, 10, "Loading notes", f"Reading extracted notes from {presentation['filename']}")
+    slides = presentation["inspection"]["slides"]
+    slides_with_notes = [slide for slide in slides if slide.get("notes", "").strip() and slide.get("can_write")]
+    if not slides_with_notes:
+        raise ValueError("No writable speaker notes were found in this presentation.")
+
+    _emit_progress(progress, 18, "Preparing prompt", f"{len(slides_with_notes)} note slides ready")
+    notes_payload = _format_notes_for_model(slides_with_notes)
+    model_input = _build_model_input(prompt, notes_payload, [slide["number"] for slide in slides_with_notes])
+    _emit_progress(progress, 32, f"Sending to {provider_label}", f"Waiting for {model}")
+    model_text = _call_inference_provider(provider, model, model_input, api_key)
+    _emit_progress(progress, 66, f"{provider_label} responded", "Parsing returned notes")
+    parsed = _parse_slide_sections(model_text, [slide["number"] for slide in slides_with_notes])
+
+    _emit_progress(progress, 74, "Matching slides", "Mapping AI notes back to slide numbers")
+    summaries_by_slide: dict[int, str] = {}
+    warnings: list[str] = []
+    for slide in slides_with_notes:
+        number = slide["number"]
+        summary = parsed.get(number)
+        if summary:
+            summaries_by_slide[number] = summary
+        else:
+            warnings.append(f"Slide {number} was not returned by the model and was left unchanged.")
+
+    if not summaries_by_slide:
+        raise ValueError("The model response could not be matched back to slide numbers.")
+
+    _emit_progress(progress, 86, "Rebuilding deck", "Writing summarized notes into PowerPoint")
+    write_result = write_summarized_notes(
+        Path(presentation["pptx_path"]),
+        Path(presentation["output_path"]),
+        slides,
+        summaries_by_slide,
+    )
+    warnings.extend(write_result["warnings"])
+    summary = {
+        "model": model,
+        "updated_count": write_result["updated_count"],
+        "warnings": warnings,
+    }
+    presentation["summary"] = summary
+    if "presentations" not in session:
+        session["summary"] = summary
+
+    _emit_progress(progress, 94, "Saving results", "Preparing download and comparison")
+    dump_session(session_path, session)
+
+    comparison = []
+    for slide in slides_with_notes:
+        number = slide["number"]
+        comparison.append(
+            {
+                "number": number,
+                "originalNotes": slide.get("notes", ""),
+                "summarizedNotes": summaries_by_slide.get(number, ""),
+                "changed": number in summaries_by_slide,
+            }
+        )
+
+    return {
+        "sessionId": session_id,
+        "presentationId": presentation["id"],
+        "filename": presentation["filename"],
+        "provider": provider,
+        "updatedCount": write_result["updated_count"],
+        "warnings": warnings,
+        "downloadUrl": f"/api/download/{session_id}/{presentation['id']}",
+        "comparison": comparison,
+    }
+
+
 def _call_inference_provider(provider: str, model: str, model_input: str, api_key: str) -> str:
     if provider == "codex":
         if not _codex_login_is_connected():
@@ -437,8 +561,10 @@ def _call_inference_provider(provider: str, model: str, model_input: str, api_ke
         return _call_codex(model, model_input)
     if provider == "openai":
         return _call_openai_api(model, model_input, api_key)
-    if provider in {"openrouter", "openrouter_free"}:
+    if provider == "openrouter":
         return _call_openrouter(model, model_input, api_key)
+    if provider == "gemini":
+        return _call_gemini_api(model, model_input, api_key)
     raise ValueError("Choose a valid inference provider.")
 
 
@@ -815,6 +941,30 @@ def _call_openrouter(model: str, model_input: str, api_key: str) -> str:
     raise ValueError("OpenRouter returned no summary text.")
 
 
+def _call_gemini_api(model: str, model_input: str, api_key: str) -> str:
+    key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key:
+        raise ValueError("Enter a Gemini API key or set GEMINI_API_KEY.")
+    data = _post_json_with_headers(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        {"contents": [{"parts": [{"text": model_input}]}]},
+        {
+            "Content-Type": "application/json",
+            "X-goog-api-key": key,
+        },
+    )
+    fragments: list[str] = []
+    for candidate in data.get("candidates", []):
+        content = candidate.get("content") or {}
+        for part in content.get("parts", []):
+            text = part.get("text")
+            if text:
+                fragments.append(text)
+    if fragments:
+        return "\n".join(fragments).strip()
+    raise ValueError("Gemini returned no summary text.")
+
+
 def _post_json(url: str, bearer_token: str, payload: dict, extra_headers: dict | None = None) -> dict:
     headers = {
         "Authorization": f"Bearer {bearer_token}",
@@ -822,6 +972,10 @@ def _post_json(url: str, bearer_token: str, payload: dict, extra_headers: dict |
     }
     if extra_headers:
         headers.update(extra_headers)
+    return _post_json_with_headers(url, payload, headers)
+
+
+def _post_json_with_headers(url: str, payload: dict, headers: dict) -> dict:
     request = Request(url, data=json.dumps(payload).encode("utf-8"), method="POST", headers=headers)
     try:
         with urlopen(request, timeout=180) as response:

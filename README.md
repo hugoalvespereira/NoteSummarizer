@@ -1,6 +1,6 @@
 # PowerPoint Notes Summarizer
 
-A minimal local web app for extracting PowerPoint speaker notes, summarizing them with an OpenAI model, comparing before/after notes, and downloading a copy of the deck with summarized notes.
+A minimal local web app for extracting PowerPoint speaker notes, summarizing them with an AI provider, comparing before/after notes, and downloading a copy of the deck with summarized notes.
 
 ## Run
 
@@ -12,18 +12,22 @@ The server prints the local URL it is using. By default it starts at port `8000`
 
 ## Inference Providers
 
-The app supports three inference paths:
+The app supports four inference paths:
 
+- Gemini API key using Gemini Flash.
 - OpenAI Codex login using local OAuth through `codex exec`.
 - OpenAI API key using the Responses API.
 - OpenRouter API key using OpenRouter chat completions.
 
-You can enter API keys in the app when needed, or set them before launch:
+You can enter API keys in the app when needed, set them before launch, or copy `.env.example` to `.env`:
 
 ```bash
+export GEMINI_API_KEY="your-gemini-key"
 export OPENAI_API_KEY="your-openai-key"
 export OPENROUTER_API_KEY="your-openrouter-key"
 ```
+
+`.env` is ignored by git and is intended for local secrets.
 
 For Codex login, check local auth with:
 
@@ -37,7 +41,7 @@ codex login status
 - Accepts `.ppt` files when LibreOffice or `soffice` is installed, converting them to `.pptx` before processing.
 - Reads the presentation slide order.
 - Finds speaker notes attached to each slide.
-- Lets you choose Codex OAuth, OpenAI API key, or OpenRouter API key.
+- Lets you choose Gemini, Codex OAuth, OpenAI API key, or OpenRouter API key.
 - Lets you edit the summarization prompt and model before running.
 - Writes summarized notes back into the deck.
 - Returns a `.pptx` download.

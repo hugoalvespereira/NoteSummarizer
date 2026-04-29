@@ -12,6 +12,7 @@ const state = {
   resultExpanded: false,
   codexDetailsExpanded: false,
   promptExpanded: false,
+  summarizeRunId: 0,
 };
 
 const els = {
@@ -473,6 +474,8 @@ function selectProvider(providerId) {
 
 async function summarize() {
   if (!state.sessionId) return;
+  const runId = state.summarizeRunId + 1;
+  state.summarizeRunId = runId;
   const allPresentations = state.presentations.length ? state.presentations : [{ id: "1", filename: state.filename }];
   const presentations = allPresentations.filter((presentation) => Number(presentation.writableNoteCount ?? presentation.noteCount ?? 1) > 0);
   const skippedResults = allPresentations
@@ -492,13 +495,14 @@ async function summarize() {
   const results = [...skippedResults];
   try {
     if (state.provider === "codex") {
-      const codexResults = await summarizeSequentially(presentations);
+      const codexResults = await summarizeSequentially(presentations, runId);
       results.push(...codexResults);
     } else {
-      const apiResults = await summarizeConcurrently(presentations);
+      const apiResults = await summarizeConcurrently(presentations, runId);
       results.push(...apiResults);
     }
 
+    if (runId !== state.summarizeRunId) return;
     const successes = results.filter((result) => !result.error);
     if (!successes.length) {
       throw new Error(results[0]?.error || "Summarization failed.");
@@ -510,31 +514,48 @@ async function summarize() {
     showToast(error.message);
     setStatus("Loaded");
   } finally {
-    setSummarizeBusy(false);
-    setBusy(false);
-    hideSummaryProgress();
+    if (runId === state.summarizeRunId) {
+      setSummarizeBusy(false);
+      setBusy(false);
+      hideSummaryProgress();
+    }
   }
 }
 
-async function summarizeSequentially(presentations) {
+async function summarizeSequentially(presentations, runId) {
   const results = [];
   for (let index = 0; index < presentations.length; index += 1) {
+    if (runId !== state.summarizeRunId) return results;
     const presentation = presentations[index];
-    setSummaryProgress(index, presentations.length, `Summarizing ${presentation.filename}`, `${index} of ${presentations.length} complete`);
-    results.push(await summarizePresentation(presentation));
+    setSummaryProgress(index, presentations.length, `Starting ${presentation.filename}`, `${index} of ${presentations.length} complete`);
+    results.push(
+      await summarizePresentation(presentation, (job) => {
+        if (runId !== state.summarizeRunId) return;
+        setPresentationJobProgress(index, presentations.length, presentation, job);
+      }),
+    );
     setSummaryProgress(index + 1, presentations.length, `Summarized ${presentation.filename}`, `${index + 1} of ${presentations.length} complete`);
   }
   return results;
 }
 
-async function summarizeConcurrently(presentations) {
+async function summarizeConcurrently(presentations, runId) {
   let completed = 0;
+  const progressByPresentation = new Map(presentations.map((presentation) => [presentation.id, 0]));
   setSummaryProgress(0, presentations.length, "Summarizing presentations", `0 of ${presentations.length} complete`);
   const jobs = presentations.map(async (presentation) => {
-    const result = await summarizePresentation(presentation);
+    const result = await summarizePresentation(presentation, (job) => {
+      if (runId !== state.summarizeRunId) return;
+      progressByPresentation.set(presentation.id, Number(job.percent || 0) / 100);
+      const completedUnits = Array.from(progressByPresentation.values()).reduce((total, value) => total + value, 0);
+      const title = job.title ? `${job.title}: ${presentation.filename}` : `Summarizing ${presentation.filename}`;
+      const detail = `${Math.floor(completedUnits)} of ${presentations.length} complete · ${job.detail || "Working"}`;
+      setSummaryProgress(completedUnits, presentations.length, title, detail);
+    });
     completed += 1;
+    progressByPresentation.set(presentation.id, 1);
     setSummaryProgress(
-      completed,
+      Array.from(progressByPresentation.values()).reduce((total, value) => total + value, 0),
       presentations.length,
       `Summarized ${presentation.filename}`,
       `${completed} of ${presentations.length} complete`,
@@ -544,19 +565,12 @@ async function summarizeConcurrently(presentations) {
   return Promise.all(jobs);
 }
 
-async function summarizePresentation(presentation) {
+async function summarizePresentation(presentation, onProgress) {
   try {
-    const response = await fetch("/api/summarize", {
+    const response = await fetch("/api/summarize/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: state.sessionId,
-        presentationId: presentation.id,
-        provider: state.provider,
-        model: els.modelInput.value.trim(),
-        apiKey: els.keyInput.value.trim(),
-        prompt: els.promptInput.value.trim(),
-      }),
+      body: JSON.stringify(summarizePayload(presentation)),
     });
     const data = await response.json();
     if (!response.ok) {
@@ -565,7 +579,10 @@ async function summarizePresentation(presentation) {
         error: data.error || "Summarization failed.",
       };
     }
-    return data;
+    if (!data.jobId) {
+      throw new Error("Summarization job did not start.");
+    }
+    return await pollSummarizeJob(data.jobId, presentation, onProgress);
   } catch (error) {
     return {
       filename: presentation.filename,
@@ -574,9 +591,56 @@ async function summarizePresentation(presentation) {
   }
 }
 
+function summarizePayload(presentation) {
+  return {
+    sessionId: state.sessionId,
+    presentationId: presentation.id,
+    provider: state.provider,
+    model: els.modelInput.value.trim(),
+    apiKey: els.keyInput.value.trim(),
+    prompt: els.promptInput.value.trim(),
+  };
+}
+
+async function pollSummarizeJob(jobId, presentation, onProgress) {
+  while (true) {
+    const response = await fetch(`/api/summarize/progress/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+    const job = await response.json();
+    if (!response.ok) {
+      return {
+        filename: presentation.filename,
+        error: job.error || "Could not read summarization progress.",
+      };
+    }
+
+    if (onProgress) onProgress(job);
+    if (job.status === "complete") {
+      return job.result;
+    }
+    if (job.status === "error") {
+      return {
+        filename: presentation.filename,
+        error: job.error || job.detail || "Summarization failed.",
+      };
+    }
+    await delay(650);
+  }
+}
+
+function setPresentationJobProgress(index, total, presentation, job) {
+  const jobFraction = Number(job.percent || 0) / 100;
+  const title = job.title ? `${job.title}: ${presentation.filename}` : `Summarizing ${presentation.filename}`;
+  const detail = `${index} of ${total} complete · ${job.detail || "Working"}`;
+  setSummaryProgress(index + jobFraction, total, title, detail);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function showSummaryProgress(total) {
   els.summaryProgress.classList.remove("hidden");
-  setSummaryProgress(0, total, "Summarizing", `0 of ${total} complete`);
+  setSummaryProgress(0, total, "Preparing", `0 of ${total} complete`);
 }
 
 function setSummaryProgress(completed, total, title, detail) {
@@ -611,6 +675,7 @@ function goHome() {
 }
 
 function resetAppState() {
+  state.summarizeRunId += 1;
   state.sessionId = null;
   state.filename = null;
   state.presentations = [];
