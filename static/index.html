@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PowerPoint Notes Summarizer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">PowerPoint</p>
+          <h1>Notes Summarizer</h1>
+        </div>
+        <div class="status-pill" id="status-pill">Ready</div>
+      </header>
+
+      <section class="tool" id="upload-view">
+        <label class="drop-zone" id="drop-zone">
+          <input id="file-input" type="file" accept=".pptx,.ppt" />
+          <span class="drop-mark">+</span>
+          <span class="drop-title">Drop .pptx or .ppt</span>
+          <span class="drop-subtitle">or choose a file</span>
+        </label>
+      </section>
+
+      <section class="tool hidden" id="setup-view">
+        <div class="file-row">
+          <div>
+            <p class="eyebrow">Deck</p>
+            <h2 id="deck-name"></h2>
+          </div>
+          <button class="ghost-button" id="cancel-button" type="button">Cancel</button>
+        </div>
+
+        <div class="metrics" aria-label="Deck metrics">
+          <div>
+            <span id="slide-count">0</span>
+            <p>Slides</p>
+          </div>
+          <div>
+            <span id="note-count">0</span>
+            <p>Notes</p>
+          </div>
+          <div>
+            <span id="writable-count">0</span>
+            <p>Writable</p>
+          </div>
+        </div>
+
+        <div class="provider-group" id="provider-group" aria-label="Inference provider"></div>
+
+        <label class="field hidden" id="key-field">
+          <span id="key-label">API key</span>
+          <input id="key-input" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+
+        <label class="field">
+          <span>Model</span>
+          <input id="model-input" list="model-options" spellcheck="false" />
+          <datalist id="model-options"></datalist>
+        </label>
+
+        <label class="field">
+          <span>Summarization prompt</span>
+          <textarea id="prompt-input" rows="16"></textarea>
+        </label>
+
+        <div class="actions">
+          <button class="ghost-button" id="cancel-button-secondary" type="button">Cancel</button>
+          <button class="primary-button" id="summarize-button" type="button">Summarize</button>
+        </div>
+      </section>
+
+      <section class="hidden" id="result-view">
+        <div class="result-head">
+          <div>
+            <p class="eyebrow">Summary</p>
+            <h2 id="result-title"></h2>
+          </div>
+          <a class="primary-button link-button" id="download-link" href="#">Download</a>
+        </div>
+        <div class="warnings hidden" id="warnings"></div>
+        <div class="comparison" id="comparison"></div>
+      </section>
+
+      <div class="toast hidden" id="toast"></div>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
