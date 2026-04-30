@@ -6,7 +6,9 @@ const state = {
   filename: null,
   presentations: [],
   providers: [],
+  providerStatuses: {},
   provider: "codex",
+  allowSavedApiKeys: true,
   themeOverride: null,
   resultComparison: [],
   resultExpanded: false,
@@ -42,6 +44,14 @@ const els = {
   keyField: document.querySelector("#key-field"),
   keyLabel: document.querySelector("#key-label"),
   keyInput: document.querySelector("#key-input"),
+  providerSetupCard: document.querySelector("#provider-setup-card"),
+  providerSetupTitle: document.querySelector("#provider-setup-title"),
+  providerSetupText: document.querySelector("#provider-setup-text"),
+  providerKeyStatus: document.querySelector("#provider-key-status"),
+  providerKeyLink: document.querySelector("#provider-key-link"),
+  providerGuideLink: document.querySelector("#provider-guide-link"),
+  saveKeyButton: document.querySelector("#save-key-button"),
+  forgetKeyButton: document.querySelector("#forget-key-button"),
   modelInput: document.querySelector("#model-input"),
   promptPanel: document.querySelector("#prompt-panel"),
   promptEditButton: document.querySelector("#prompt-edit-button"),
@@ -336,6 +346,8 @@ function setSummarizeBusy(isBusy) {
   els.codexAuthButton.disabled = isBusy;
   els.codexDetailsButton.disabled = isBusy;
   els.keyInput.disabled = isBusy;
+  els.saveKeyButton.disabled = isBusy || !els.keyInput.value.trim();
+  els.forgetKeyButton.disabled = isBusy;
   els.modelInput.disabled = isBusy;
   els.promptEditButton.disabled = isBusy;
   els.promptInput.disabled = isBusy;
@@ -370,6 +382,7 @@ async function analyzeFiles(files) {
     state.sessionId = data.sessionId;
     state.filename = data.filename;
     state.presentations = normalizePresentations(data);
+    state.allowSavedApiKeys = data.allowSavedApiKeys ?? true;
     renderSetup(data);
     setView("setup");
     setStatus("Loaded");
@@ -415,9 +428,14 @@ function renderSetup(data) {
   setPromptExpanded(false);
   state.codexDetailsExpanded = false;
   state.providers = data.providers || [];
+  state.providerStatuses = providerStatusesFromList(state.providers);
   state.provider = data.provider || "codex";
   renderProviders();
   selectProvider(state.provider);
+}
+
+function providerStatusesFromList(providers) {
+  return Object.fromEntries((providers || []).map((provider) => [provider.id, provider.keyStatus || {}]));
 }
 
 function sumPresentations(presentations, key) {
@@ -430,11 +448,16 @@ function renderProviders() {
     const label = document.createElement("label");
     const speedLabel = provider.speedLabel || (provider.id === "codex" ? "slower" : "faster");
     const speedClass = `is-${speedLabel.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`;
+    const keyStatus = provider.keyStatus || state.providerStatuses[provider.id] || {};
+    const keyBadge = provider.requiresKey
+      ? `<small class="provider-config ${keyStatus.configured ? "is-configured" : "is-missing"}">${escapeHtml(keyStatus.configured ? keyStatus.source : "setup")}</small>`
+      : "";
     label.innerHTML = `
       <input type="radio" name="provider" value="${escapeHtml(provider.id)}" />
       <span class="provider-option">
         <span class="provider-name">${escapeHtml(provider.shortLabel)}</span>
         <small class="provider-speed ${speedClass}">${escapeHtml(speedLabel)}</small>
+        ${keyBadge}
       </span>
     `;
     const input = label.querySelector("input");
@@ -454,7 +477,8 @@ function selectProvider(providerId) {
   els.keyField.classList.toggle("hidden", !provider.requiresKey);
   els.codexAuthPanel.classList.toggle("hidden", provider.id !== "codex");
   els.keyLabel.textContent = provider.keyLabel || "API key";
-  els.keyInput.placeholder = provider.envKey ? `Optional if ${provider.envKey} is set` : "";
+  const envHint = provider.envKeys?.length ? provider.envKeys.join(" or ") : provider.envKey;
+  els.keyInput.placeholder = envHint ? `Optional if ${envHint} is saved or set` : "";
   els.keyInput.value = "";
   els.modelInput.innerHTML = "";
   provider.models.forEach((model) => {
@@ -469,6 +493,108 @@ function selectProvider(providerId) {
     refreshCodexAuthStatus();
   } else {
     clearCodexAuthPoll();
+  }
+  renderProviderSetupCard(provider);
+}
+
+function renderProviderSetupCard(provider = selectedProvider()) {
+  if (!provider || !provider.requiresKey) {
+    els.providerSetupCard.classList.add("hidden");
+    return;
+  }
+
+  const keyStatus = state.providerStatuses[provider.id] || provider.keyStatus || {};
+  const isGemini = provider.id === "gemini";
+  els.providerSetupTitle.textContent = isGemini ? "Need a free Gemini key?" : `${provider.shortLabel} setup`;
+  els.providerSetupText.textContent = isGemini
+    ? "Create one in Google AI Studio, paste it here once, and save it for future summaries."
+    : provider.setupSummary || "Paste an API key once and save it for future summaries.";
+  els.providerKeyStatus.textContent = keyStatus.label || "Needs setup";
+  els.providerKeyStatus.dataset.status = keyStatus.configured ? "configured" : "missing";
+  els.providerKeyLink.href = provider.keyUrl || provider.docsUrl || "/provider-setup.html";
+  els.providerKeyLink.textContent = isGemini ? "Get Gemini key" : "Get key";
+  els.providerGuideLink.href = `/provider-setup.html#${encodeURIComponent(provider.id)}`;
+
+  const canSave = Boolean(state.allowSavedApiKeys && keyStatus.canSave !== false);
+  els.saveKeyButton.disabled = !canSave || !els.keyInput.value.trim();
+  els.saveKeyButton.classList.toggle("hidden", !canSave);
+  els.forgetKeyButton.disabled = !canSave || !keyStatus.saved;
+  els.forgetKeyButton.classList.toggle("hidden", !canSave || !keyStatus.saved);
+  els.providerSetupCard.classList.remove("hidden");
+  scheduleScrollCueUpdate();
+}
+
+function selectedProvider() {
+  return state.providers.find((item) => item.id === state.provider);
+}
+
+async function refreshProviderStatuses() {
+  const response = await fetch("/api/provider-status", { cache: "no-store" });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Could not refresh provider status.");
+  state.allowSavedApiKeys = data.allowSavedApiKeys ?? state.allowSavedApiKeys;
+  state.providerStatuses = data.statuses || providerStatusesFromList(data.providers || []);
+  if (Array.isArray(data.providers) && data.providers.length) {
+    state.providers = data.providers;
+  } else {
+    state.providers = state.providers.map((provider) => ({
+      ...provider,
+      keyStatus: state.providerStatuses[provider.id] || provider.keyStatus,
+    }));
+  }
+  renderProviders();
+  selectProvider(state.provider);
+}
+
+async function saveProviderKey() {
+  const provider = selectedProvider();
+  if (!provider || !provider.requiresKey) return;
+  const apiKey = els.keyInput.value.trim();
+  if (!apiKey) {
+    showToast("Paste an API key before saving.");
+    return;
+  }
+
+  els.saveKeyButton.disabled = true;
+  try {
+    const response = await fetch("/api/provider-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: provider.id, apiKey }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not save API key.");
+    state.allowSavedApiKeys = data.allowSavedApiKeys ?? state.allowSavedApiKeys;
+    state.providerStatuses = data.statuses || providerStatusesFromList(data.providers || []);
+    if (Array.isArray(data.providers)) state.providers = data.providers;
+    els.keyInput.value = "";
+    renderProviders();
+    selectProvider(provider.id);
+    showToast(`${provider.shortLabel} key saved on this server.`);
+  } catch (error) {
+    showToast(error.message);
+    renderProviderSetupCard(provider);
+  }
+}
+
+async function forgetProviderKey() {
+  const provider = selectedProvider();
+  if (!provider || !provider.requiresKey) return;
+
+  els.forgetKeyButton.disabled = true;
+  try {
+    const response = await fetch(`/api/provider-key/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not forget API key.");
+    state.allowSavedApiKeys = data.allowSavedApiKeys ?? state.allowSavedApiKeys;
+    state.providerStatuses = data.statuses || providerStatusesFromList(data.providers || []);
+    if (Array.isArray(data.providers)) state.providers = data.providers;
+    renderProviders();
+    selectProvider(provider.id);
+    showToast(`${provider.shortLabel} saved key removed.`);
+  } catch (error) {
+    showToast(error.message);
+    renderProviderSetupCard(provider);
   }
 }
 
@@ -680,6 +806,7 @@ function resetAppState() {
   state.filename = null;
   state.presentations = [];
   state.providers = [];
+  state.providerStatuses = {};
   state.provider = "codex";
   state.resultComparison = [];
   state.resultExpanded = false;
@@ -877,6 +1004,9 @@ els.showAllButton.addEventListener("click", expandComparison);
 els.themeToggle.addEventListener("click", toggleTheme);
 els.codexAuthButton.addEventListener("click", startCodexOAuth);
 els.codexDetailsButton.addEventListener("click", toggleCodexDetails);
+els.keyInput.addEventListener("input", () => renderProviderSetupCard());
+els.saveKeyButton.addEventListener("click", saveProviderKey);
+els.forgetKeyButton.addEventListener("click", forgetProviderKey);
 els.promptEditButton.addEventListener("click", togglePromptEditor);
 window.addEventListener("resize", scheduleComparisonSizing);
 window.addEventListener("resize", scheduleScrollCueUpdate);

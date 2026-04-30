@@ -1,7 +1,19 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from app import _call_gemini_api, _parse_multipart, _parse_slide_sections, _public_providers
+import app
+from app import (
+    _call_gemini_api,
+    _delete_provider_api_key,
+    _parse_multipart,
+    _parse_slide_sections,
+    _provider_status_payload,
+    _public_providers,
+    _resolve_provider_api_key,
+    _save_provider_api_key,
+)
 
 
 class AppParsingTest(unittest.TestCase):
@@ -59,6 +71,7 @@ Slide 5
         self.assertEqual([provider["shortLabel"] for provider in providers], ["Gemini", "OpenAI Login", "OpenAI API", "OpenRouter API"])
         self.assertEqual(providers[0]["speedLabel"], "free")
         self.assertEqual(providers[0]["envKey"], "GEMINI_API_KEY")
+        self.assertIn("GOOGLE_API_KEY", providers[0]["envKeys"])
 
     @patch("app._post_json_with_headers")
     def test_gemini_call_uses_api_key_header_and_extracts_text(self, post_json):
@@ -85,6 +98,30 @@ Slide 5
                 "X-goog-api-key": "local-key",
             },
         )
+
+    def test_saved_provider_key_is_used_without_echoing_secret_in_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(app, "DATA_DIR", Path(tmp)), patch.object(
+                app, "PROVIDER_KEYS_PATH", Path(tmp) / "provider-keys.json"
+            ), patch.object(app, "ALLOW_SAVED_API_KEYS", True), patch.dict("os.environ", {}, clear=True):
+                _save_provider_api_key("gemini", "saved-gemini-key")
+
+                self.assertEqual(_resolve_provider_api_key("gemini"), "saved-gemini-key")
+                payload = _provider_status_payload()
+                gemini_status = payload["statuses"]["gemini"]
+                self.assertTrue(gemini_status["configured"])
+                self.assertEqual(gemini_status["source"], "saved")
+                self.assertNotIn("saved-gemini-key", str(payload))
+
+                _delete_provider_api_key("gemini")
+                self.assertFalse(_provider_status_payload()["statuses"]["gemini"]["configured"])
+
+    def test_environment_provider_key_is_used_when_no_saved_key_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(app, "PROVIDER_KEYS_PATH", Path(tmp) / "provider-keys.json"), patch.dict(
+                "os.environ", {"GOOGLE_API_KEY": "env-gemini-key"}, clear=True
+            ):
+                self.assertEqual(_resolve_provider_api_key("gemini"), "env-gemini-key")
 
 
 if __name__ == "__main__":

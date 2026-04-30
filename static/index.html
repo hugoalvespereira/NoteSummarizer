@@ -44,6 +44,7 @@
       </section>
 
       <footer class="home-credit" aria-label="Creator links">
+        <a class="home-guide-link" href="/provider-setup.html">Provider setup</a>
         <span>Created by Hugo Alves Pereira</span>
         <a href="https://www.linkedin.com/in/hugo-a-pereira/" target="_blank" rel="noopener" aria-label="Hugo Alves Pereira on LinkedIn">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -84,7 +85,7 @@
               <button class="info-button" type="button" aria-label="AI provider information">i</button>
               <span class="info-card" role="tooltip">
                 <strong>AI provider</strong>
-                <span>Choose which service summarizes the speaker notes, then pick the model it should use. Keys can be entered here or loaded from .env.</span>
+                <span>Choose which service summarizes the speaker notes. Keys can be entered once, saved on this server, or loaded from .env.</span>
               </span>
             </span>
           </div>
@@ -113,6 +114,20 @@
           <span id="key-label">API key</span>
           <input id="key-input" type="password" autocomplete="off" spellcheck="false" />
         </label>
+
+        <section class="provider-setup-card hidden" id="provider-setup-card" aria-label="Provider setup">
+          <div>
+            <span id="provider-setup-title">Provider setup</span>
+            <p id="provider-setup-text"></p>
+            <small id="provider-key-status"></small>
+          </div>
+          <div class="provider-setup-actions">
+            <a class="ghost-button compact-button" id="provider-key-link" href="#" target="_blank" rel="noopener">Get key</a>
+            <a class="ghost-button compact-button" id="provider-guide-link" href="/provider-setup.html">Setup guide</a>
+            <button class="ghost-button compact-button" id="save-key-button" type="button">Save key</button>
+            <button class="ghost-button compact-button" id="forget-key-button" type="button">Forget</button>
+          </div>
+        </section>
 
         <div class="field">
           <div class="field-label-row">

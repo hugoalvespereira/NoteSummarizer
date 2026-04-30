@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Provider Setup - PowerPoint Notes Summarizer</title>
+    <script>
+      (() => {
+        const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+        document.documentElement.dataset.theme = systemTheme;
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell guide-shell">
+      <header class="topbar guide-topbar">
+        <div>
+          <p class="eyebrow">Setup</p>
+          <h1>AI Provider Setup</h1>
+          <p class="tagline">
+            <span>Use environment variables for deployments.</span>
+            <span>Or save keys once from the app.</span>
+          </p>
+          <p class="guide-nav"><a href="/">Back to summarizer</a></p>
+        </div>
+      </header>
+
+      <section class="guide-grid" aria-label="Provider setup options">
+        <article class="guide-card" id="gemini">
+          <div>
+            <p class="eyebrow">Free-friendly default</p>
+            <h2>Gemini</h2>
+            <p>Best first choice if you want a free Google API key and simple setup.</p>
+          </div>
+          <ol>
+            <li>Open Google AI Studio.</li>
+            <li>Sign in with a Google account.</li>
+            <li>Create a Gemini API key.</li>
+            <li>Paste it into this app and choose Save key.</li>
+          </ol>
+          <div class="guide-actions">
+            <a class="primary-button link-button" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Get Gemini key</a>
+            <a class="ghost-button link-button" href="https://ai.google.dev/gemini-api/docs/api-key?hl=en" target="_blank" rel="noopener">Google docs</a>
+          </div>
+        </article>
+
+        <article class="guide-card" id="openai">
+          <div>
+            <p class="eyebrow">High quality</p>
+            <h2>OpenAI API</h2>
+            <p>Best when you want fast server-side summaries through your OpenAI API account.</p>
+          </div>
+          <ol>
+            <li>Open the OpenAI API keys page.</li>
+            <li>Create a new project key.</li>
+            <li>Paste it into this app and choose Save key.</li>
+          </ol>
+          <div class="guide-actions">
+            <a class="primary-button link-button" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">Get OpenAI key</a>
+            <a class="ghost-button link-button" href="https://platform.openai.com/docs/quickstart" target="_blank" rel="noopener">OpenAI docs</a>
+          </div>
+        </article>
+
+        <article class="guide-card" id="openrouter">
+          <div>
+            <p class="eyebrow">Model router</p>
+            <h2>OpenRouter API</h2>
+            <p>Best when you want one API key that can route to different model providers.</p>
+          </div>
+          <ol>
+            <li>Open OpenRouter settings.</li>
+            <li>Create an API key.</li>
+            <li>Paste it into this app and choose Save key.</li>
+          </ol>
+          <div class="guide-actions">
+            <a class="primary-button link-button" href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">Get OpenRouter key</a>
+            <a class="ghost-button link-button" href="https://openrouter.ai/docs/api-reference/overview" target="_blank" rel="noopener">OpenRouter docs</a>
+          </div>
+        </article>
+
+        <article class="guide-card" id="codex">
+          <div>
+            <p class="eyebrow">Local login</p>
+            <h2>OpenAI Login</h2>
+            <p>Best for local or private deployments where the Codex CLI can keep an OpenAI login session.</p>
+          </div>
+          <ol>
+            <li>Install the Codex CLI in the environment running the app.</li>
+            <li>Choose OpenAI Login in the app.</li>
+            <li>Complete the OAuth popup.</li>
+          </ol>
+          <div class="guide-actions">
+            <a class="ghost-button link-button" href="https://developers.openai.com/codex/cli" target="_blank" rel="noopener">Codex CLI docs</a>
+          </div>
+        </article>
+      </section>
+
+      <section class="guide-note">
+        <h2>Deployment keys</h2>
+        <p>For Docker or server deployments, prefer environment variables or Docker secrets. The app also supports saving keys to the server-side data volume so users do not need to retype them.</p>
+        <pre><code>GEMINI_API_KEY=...
+OPENAI_API_KEY=...
+OPENROUTER_API_KEY=...</code></pre>
+      </section>
+    </main>
+  </body>
+</html>

@@ -55,13 +55,22 @@ def _load_env_file(path: Path) -> None:
 ROOT = Path(__file__).resolve().parent
 _load_env_file(ROOT / ".env")
 STATIC_DIR = ROOT / "static"
-WORK_DIR = Path(tempfile.gettempdir()) / "powerpoint-notes-summarizer"
+def _path_from_env(name: str, default: Path) -> Path:
+    value = os.environ.get(name, "").strip()
+    return Path(value).expanduser() if value else default
+
+
+DATA_DIR = _path_from_env("DATA_DIR", ROOT / "data")
+PROVIDER_KEYS_PATH = DATA_DIR / "provider-keys.json"
+WORK_DIR = _path_from_env("WORK_DIR", Path(tempfile.gettempdir()) / "powerpoint-notes-summarizer")
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_UPLOAD_FILES = 5
+ALLOW_SAVED_API_KEYS = os.environ.get("ALLOW_SAVED_API_KEYS", "1").strip().lower() not in {"0", "false", "no"}
 CODEX_LOGIN_SESSION: dict = {}
 SUMMARIZE_JOBS: dict[str, dict] = {}
 SUMMARIZE_JOBS_LOCK = threading.Lock()
 SUMMARIZE_JOB_RETENTION_SECONDS = 60 * 60
+PROVIDER_KEYS_LOCK = threading.RLock()
 
 STANDARD_PROMPT = """Transform the provided detailed slide notes into concise bullet-point reminders for live presentation delivery.
 
@@ -97,9 +106,13 @@ PROVIDERS = {
         "requiresKey": True,
         "keyLabel": "Gemini API key",
         "envKey": "GEMINI_API_KEY",
+        "altEnvKeys": ["GOOGLE_API_KEY"],
         "speedLabel": "free",
         "defaultModel": "gemini-flash-latest",
         "models": ["gemini-flash-latest"],
+        "keyUrl": "https://aistudio.google.com/app/apikey",
+        "docsUrl": "https://ai.google.dev/gemini-api/docs/api-key?hl=en",
+        "setupSummary": "Create a free-friendly Gemini key in Google AI Studio.",
     },
     "codex": {
         "label": "OpenAI Codex login",
@@ -107,9 +120,13 @@ PROVIDERS = {
         "requiresKey": False,
         "keyLabel": "",
         "envKey": "",
+        "altEnvKeys": [],
         "speedLabel": "slower",
         "defaultModel": "gpt-5.4-mini",
         "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.2", "gpt-5.3-codex"],
+        "keyUrl": "",
+        "docsUrl": "https://developers.openai.com/codex/cli",
+        "setupSummary": "Sign in locally with Codex OAuth when running this app on your own machine.",
     },
     "openai": {
         "label": "OpenAI API key",
@@ -117,9 +134,13 @@ PROVIDERS = {
         "requiresKey": True,
         "keyLabel": "OpenAI API key",
         "envKey": "OPENAI_API_KEY",
+        "altEnvKeys": [],
         "speedLabel": "faster",
         "defaultModel": "gpt-5.4-mini",
         "models": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-4.1-mini", "gpt-4.1"],
+        "keyUrl": "https://platform.openai.com/api-keys",
+        "docsUrl": "https://platform.openai.com/docs/quickstart",
+        "setupSummary": "Use an OpenAI API key for high-quality summaries without OAuth.",
     },
     "openrouter": {
         "label": "OpenRouter API key",
@@ -127,9 +148,13 @@ PROVIDERS = {
         "requiresKey": True,
         "keyLabel": "OpenRouter API key",
         "envKey": "OPENROUTER_API_KEY",
+        "altEnvKeys": [],
         "speedLabel": "faster",
         "defaultModel": "openai/gpt-5.2",
         "models": ["openai/gpt-5.2", "openai/gpt-5.1", "openai/gpt-5", "openai/gpt-4.1"],
+        "keyUrl": "https://openrouter.ai/settings/keys",
+        "docsUrl": "https://openrouter.ai/docs/api-reference/overview",
+        "setupSummary": "Use one OpenRouter key to route summaries through many model providers.",
     },
 }
 DEFAULT_PROVIDER = "codex"
@@ -161,6 +186,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/summarize/progress/"):
             self._summarize_progress(parsed.path.removeprefix("/api/summarize/progress/"))
             return
+        if parsed.path == "/api/provider-status":
+            self._provider_status()
+            return
         if parsed.path == "/api/codex-oauth/status":
             self._json(codex_oauth_status())
             return
@@ -175,6 +203,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._summarize()
             elif parsed.path == "/api/summarize/start":
                 self._start_summarize_job()
+            elif parsed.path == "/api/provider-key":
+                self._save_provider_key()
             elif parsed.path == "/api/codex-oauth/start":
                 self._start_codex_oauth()
             elif parsed.path == "/api/cancel":
@@ -191,6 +221,18 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.end_headers()
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path.startswith("/api/provider-key/"):
+                self._delete_provider_key(parsed.path.removeprefix("/api/provider-key/"))
+            else:
+                self._json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            self._json({"error": f"Unexpected server error: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -261,6 +303,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "prompt": STANDARD_PROMPT,
                 "provider": DEFAULT_PROVIDER,
                 "providers": _public_providers(),
+                "allowSavedApiKeys": ALLOW_SAVED_API_KEYS,
                 "limits": {"maxFiles": MAX_UPLOAD_FILES, "maxTotalMb": MAX_UPLOAD_BYTES // (1024 * 1024)},
             }
         )
@@ -300,6 +343,18 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _start_codex_oauth(self) -> None:
         self._json(start_codex_oauth())
+
+    def _provider_status(self) -> None:
+        self._json(_provider_status_payload())
+
+    def _save_provider_key(self) -> None:
+        payload = self._read_json()
+        provider_id = (payload.get("provider") or "").strip()
+        api_key = (payload.get("apiKey") or "").strip()
+        self._json(_save_provider_api_key(provider_id, api_key))
+
+    def _delete_provider_key(self, provider_id: str) -> None:
+        self._json(_delete_provider_api_key(unquote(provider_id)))
 
     def _cancel(self) -> None:
         payload = self._read_json()
@@ -891,9 +946,7 @@ def _clean_terminal_text(text: str) -> str:
 
 
 def _call_openai_api(model: str, model_input: str, api_key: str) -> str:
-    key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
-    if not key:
-        raise ValueError("Enter an OpenAI API key or set OPENAI_API_KEY.")
+    key = _resolve_provider_api_key("openai", api_key)
     data = _post_json(
         "https://api.openai.com/v1/responses",
         key,
@@ -914,9 +967,7 @@ def _call_openai_api(model: str, model_input: str, api_key: str) -> str:
 
 
 def _call_openrouter(model: str, model_input: str, api_key: str) -> str:
-    key = api_key or os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not key:
-        raise ValueError("Enter an OpenRouter API key or set OPENROUTER_API_KEY.")
+    key = _resolve_provider_api_key("openrouter", api_key)
     data = _post_json(
         "https://openrouter.ai/api/v1/chat/completions",
         key,
@@ -942,9 +993,7 @@ def _call_openrouter(model: str, model_input: str, api_key: str) -> str:
 
 
 def _call_gemini_api(model: str, model_input: str, api_key: str) -> str:
-    key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key:
-        raise ValueError("Enter a Gemini API key or set GEMINI_API_KEY.")
+    key = _resolve_provider_api_key("gemini", api_key)
     data = _post_json_with_headers(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         {"contents": [{"parts": [{"text": model_input}]}]},
@@ -985,6 +1034,144 @@ def _post_json_with_headers(url: str, payload: dict, headers: dict) -> dict:
         raise ValueError(f"Inference request failed: {detail}") from exc
     except URLError as exc:
         raise ValueError(f"Inference request failed: {exc.reason}") from exc
+
+
+def _resolve_provider_api_key(provider_id: str, request_key: str = "") -> str:
+    provider = PROVIDERS.get(provider_id)
+    if not provider or not provider.get("requiresKey"):
+        return request_key.strip()
+
+    key = request_key.strip()
+    if key:
+        return key
+
+    key = _saved_provider_key(provider_id)
+    if key:
+        return key
+
+    key = _env_provider_key(provider_id)
+    if key:
+        return key
+
+    env_names = _provider_env_names(provider)
+    hint = f"Enter a {provider['keyLabel']}"
+    if env_names:
+        hint += f" or set {' or '.join(env_names)}"
+    hint += "."
+    raise ValueError(hint)
+
+
+def _provider_env_names(provider: dict) -> list[str]:
+    names = []
+    env_key = provider.get("envKey")
+    if env_key:
+        names.append(env_key)
+    names.extend(provider.get("altEnvKeys") or [])
+    return names
+
+
+def _env_provider_key(provider_id: str) -> str:
+    provider = PROVIDERS.get(provider_id)
+    if not provider:
+        return ""
+    for env_name in _provider_env_names(provider):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _saved_provider_key(provider_id: str) -> str:
+    if not ALLOW_SAVED_API_KEYS:
+        return ""
+    return str(_load_provider_keys().get(provider_id, "")).strip()
+
+
+def _load_provider_keys() -> dict[str, str]:
+    with PROVIDER_KEYS_LOCK:
+        if not PROVIDER_KEYS_PATH.exists():
+            return {}
+        try:
+            data = json.loads(PROVIDER_KEYS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(key): str(value) for key, value in data.items() if isinstance(value, str) and value.strip()}
+
+
+def _write_provider_keys(keys: dict[str, str]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = PROVIDER_KEYS_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(keys, indent=2, sort_keys=True), encoding="utf-8")
+    os.chmod(temp_path, 0o600)
+    temp_path.replace(PROVIDER_KEYS_PATH)
+    try:
+        os.chmod(PROVIDER_KEYS_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def _save_provider_api_key(provider_id: str, api_key: str) -> dict:
+    if not ALLOW_SAVED_API_KEYS:
+        raise ValueError("Saving API keys is disabled on this deployment.")
+    provider = PROVIDERS.get(provider_id)
+    if not provider or not provider.get("requiresKey"):
+        raise ValueError("Choose a provider that uses an API key.")
+    if not api_key:
+        raise ValueError("Paste an API key before saving.")
+
+    with PROVIDER_KEYS_LOCK:
+        keys = _load_provider_keys()
+        keys[provider_id] = api_key
+        _write_provider_keys(keys)
+    return _provider_status_payload()
+
+
+def _delete_provider_api_key(provider_id: str) -> dict:
+    if not ALLOW_SAVED_API_KEYS:
+        raise ValueError("Saving API keys is disabled on this deployment.")
+    provider = PROVIDERS.get(provider_id)
+    if not provider or not provider.get("requiresKey"):
+        raise ValueError("Choose a provider that uses an API key.")
+
+    with PROVIDER_KEYS_LOCK:
+        keys = _load_provider_keys()
+        keys.pop(provider_id, None)
+        _write_provider_keys(keys)
+    return _provider_status_payload()
+
+
+def _provider_status_payload() -> dict:
+    return {
+        "allowSavedApiKeys": ALLOW_SAVED_API_KEYS,
+        "providers": _public_providers(),
+        "statuses": {provider_id: _provider_key_status(provider_id) for provider_id in PROVIDERS},
+    }
+
+
+def _provider_key_status(provider_id: str) -> dict:
+    provider = PROVIDERS[provider_id]
+    if not provider.get("requiresKey"):
+        return {
+            "configured": True,
+            "source": "login",
+            "label": "Uses login",
+            "canSave": False,
+        }
+
+    saved = bool(_saved_provider_key(provider_id))
+    env = bool(_env_provider_key(provider_id))
+    source = "saved" if saved else "environment" if env else "missing"
+    label = "Saved on this server" if saved else "Configured by environment" if env else "Needs setup"
+    return {
+        "configured": saved or env,
+        "source": source,
+        "label": label,
+        "saved": saved,
+        "environment": env,
+        "canSave": ALLOW_SAVED_API_KEYS,
+    }
 
 
 def _build_model_input(prompt: str, notes_payload: str, slide_numbers: list[int]) -> str:
@@ -1130,10 +1317,15 @@ def _public_providers() -> list[dict]:
             "requiresKey": config["requiresKey"],
             "keyLabel": config["keyLabel"],
             "envKey": config["envKey"],
+            "envKeys": _provider_env_names(config),
             "speedLabel": config["speedLabel"],
             "defaultModel": config["defaultModel"],
             "models": config["models"],
             "modelDescriptions": {model: MODEL_DESCRIPTIONS.get(model, "") for model in config["models"]},
+            "keyUrl": config["keyUrl"],
+            "docsUrl": config["docsUrl"],
+            "setupSummary": config["setupSummary"],
+            "keyStatus": _provider_key_status(provider_id),
         }
         for provider_id, config in PROVIDERS.items()
     ]
@@ -1153,11 +1345,11 @@ def _safe_id(value: str) -> str:
     return value
 
 
-def _make_server(preferred_port: int) -> tuple[ThreadingHTTPServer, int]:
+def _make_server(host: str, preferred_port: int) -> tuple[ThreadingHTTPServer, int]:
     last_error: OSError | None = None
     for port in range(preferred_port, preferred_port + 50):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), AppHandler)
+            server = ThreadingHTTPServer((host, port), AppHandler)
             return server, port
         except OSError as exc:
             last_error = exc
@@ -1167,10 +1359,12 @@ def _make_server(preferred_port: int) -> tuple[ThreadingHTTPServer, int]:
 
 
 def main() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    host = os.environ.get("HOST", "127.0.0.1")
     preferred_port = int(os.environ.get("PORT", "8000"))
-    server, port = _make_server(preferred_port)
-    print(f"PowerPoint Notes Summarizer running at http://127.0.0.1:{port}", flush=True)
+    server, port = _make_server(host, preferred_port)
+    print(f"PowerPoint Notes Summarizer running at http://{host}:{port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

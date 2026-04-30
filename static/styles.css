@@ -370,6 +370,24 @@ h2 {
   transform: translateY(-1px);
 }
 
+.home-credit .home-guide-link {
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.home-credit .home-guide-link:hover {
+  background: transparent;
+  color: var(--ink);
+  text-decoration: underline;
+  transform: none;
+}
+
 .home-credit svg {
   width: 12px;
   height: 12px;
@@ -585,6 +603,7 @@ h2 {
 
 .provider-group > label > span {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   min-height: 42px;
   align-items: center;
@@ -630,6 +649,28 @@ h2 {
 .provider-speed.is-free {
   border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
   color: var(--blue);
+}
+
+.provider-config {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 780;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.provider-config.is-configured {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  color: var(--accent);
+}
+
+.provider-config.is-missing {
+  border-color: color-mix(in srgb, var(--rose) 28%, var(--line));
+  color: var(--rose);
 }
 
 .field > span,
@@ -705,6 +746,61 @@ h2 {
 .info-popover:focus-within .info-card {
   opacity: 1;
   transform: translateY(0);
+}
+
+.provider-setup-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 62%),
+    var(--surface);
+  padding: 12px;
+}
+
+.provider-setup-card > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.provider-setup-card span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.provider-setup-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.provider-setup-card small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.provider-setup-card small[data-status="configured"] {
+  color: var(--accent);
+}
+
+.provider-setup-card small[data-status="missing"] {
+  color: var(--rose);
+}
+
+.provider-setup-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .prompt-panel {
@@ -1035,6 +1131,88 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.guide-shell {
+  width: min(980px, calc(100% - 40px));
+  gap: 22px;
+}
+
+.guide-topbar {
+  margin-bottom: 12px;
+}
+
+.guide-nav {
+  margin: 18px 0 0;
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.guide-nav a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.guide-nav a:hover {
+  text-decoration: underline;
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.guide-card,
+.guide-note {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  padding: 20px;
+}
+
+.guide-card h2,
+.guide-note h2 {
+  margin: 0;
+}
+
+.guide-card p,
+.guide-note p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.guide-card ol {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 22px;
+  color: var(--ink);
+}
+
+.guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.guide-note pre {
+  margin: 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-quiet);
+  padding: 14px;
+}
+
+.guide-note code {
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
+  font-size: 13px;
+}
+
 .hidden {
   display: none !important;
 }
@@ -1108,16 +1286,25 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .guide-grid {
+    grid-template-columns: 1fr;
+  }
+
   .oauth-panel {
     align-items: stretch;
     flex-direction: column;
   }
 
   .oauth-actions,
+  .provider-setup-card,
   .prompt-row,
   .summary-progress-copy {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .provider-setup-actions {
+    justify-content: stretch;
   }
 
   .account-details {

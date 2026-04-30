@@ -1,0 +1,21 @@
+services:
+  notes-summarizer:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATA_DIR: /data
+      WORK_DIR: /tmp/powerpoint-notes-summarizer
+      HOME: /data
+      CODEX_HOME: /data/.codex
+      CODEX_BIN: /usr/local/bin/codex
+    volumes:
+      - notes-summarizer-data:/data
+    restart: unless-stopped
+
+volumes:
+  notes-summarizer-data:
