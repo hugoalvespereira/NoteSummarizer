@@ -1,5 +1,7 @@
 # PowerPoint Notes Summarizer
 
+![Upload screen](docs/screenshots/01-upload.png)
+
 A minimal web app for extracting PowerPoint speaker notes, summarizing them with an AI provider, comparing before/after notes, and downloading a copy of the deck with cleaner notes.
 
 ## Run Locally
