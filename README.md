@@ -49,13 +49,12 @@ The compose file mounts a persistent Docker volume at `/data`. Saved API keys ar
 
 ### Codex Login In Docker
 
-The Docker image installs Node.js, npm, LibreOffice, and the Codex CLI package so the `OpenAI Login` option can work inside the container. Codex login state is kept under `/data` through the persistent volume.
+The Docker image installs Node.js, npm, and the Codex CLI package so the `OpenAI Login` option can work inside the container. Codex login state is kept under `/data` through the persistent volume.
 
 To use OpenAI Login in Docker, start the app, choose `OpenAI Login`, then complete the OAuth popup. If you prefer API keys, Gemini, OpenAI API, and OpenRouter API work without Codex login.
 
 ### Docker Notes
 
-- LibreOffice is included so `.ppt` files can be converted to `.pptx`.
 - Server-configured keys can be provided with `.env`, Docker secrets, or your hosting provider's environment-variable UI.
 - If `ALLOW_SAVED_API_KEYS=0`, users can still paste one-off keys for a run, but the app will not save them server-side.
 - For a public deployment, put the app behind authentication or rate limiting before enabling server-owned API keys for anonymous users.
@@ -83,14 +82,37 @@ API keys are resolved in this order:
 
 ## What It Does
 
-- Accepts `.pptx` files directly.
-- Accepts `.ppt` files when LibreOffice or `soffice` is installed.
+- Accepts `.pptx` files.
 - Reads presentation slide order and speaker notes.
 - Lets you choose the AI provider and model.
 - Lets you edit the summarization prompt.
 - Shows real progress through extraction, AI call, parsing, and deck reconstruction.
 - Writes summarized notes back into the deck.
 - Returns a `.pptx` download, or a `.zip` when multiple decks are uploaded.
+
+## Screenshots
+
+### Upload
+
+![Upload screen](docs/screenshots/01-upload.png)
+
+### Presentation Setup
+
+![Presentation setup](docs/screenshots/02-presentation-setup.png)
+
+### Summarizing Progress
+
+![Summarizing progress](docs/screenshots/03-summarizing-progress.png)
+
+### Results
+
+![Summary results](docs/screenshots/04-summary-results.png)
+
+### Provider Setup
+
+![Provider setup light mode](docs/screenshots/05-provider-setup-light.png)
+
+![Provider setup dark mode](docs/screenshots/06-provider-setup-dark.png)
 
 ## Tests
 

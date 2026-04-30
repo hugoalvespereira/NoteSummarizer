@@ -3,7 +3,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from pptx_notes import inspect_pptx, write_summarized_notes
+from pptx_notes import PowerPointError, inspect_pptx, prepare_powerpoint, write_summarized_notes
 
 
 class PptxNotesTest(unittest.TestCase):
@@ -39,6 +39,14 @@ class PptxNotesTest(unittest.TestCase):
                 self.assertIn(b'typeface="Aptos"', updated_notes_xml)
                 self.assertIn(b'sz="2400"', updated_notes_xml)
                 self.assertNotIn(b'sz="1200"', updated_notes_xml)
+
+    def test_legacy_ppt_is_not_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "legacy.ppt"
+            source.write_bytes(b"legacy")
+
+            with self.assertRaisesRegex(PowerPointError, "Only \\.pptx files"):
+                prepare_powerpoint(source, Path(tmp))
 
     def _write_sample_pptx(self, path: Path):
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as deck:

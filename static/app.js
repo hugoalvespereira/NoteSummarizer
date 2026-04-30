@@ -1,5 +1,6 @@
 const MAX_UPLOAD_FILES = 5;
 const MAX_UPLOAD_MB = 80;
+const THEME_STORAGE_KEY = "notes-summarizer-theme";
 
 const state = {
   sessionId: null,
@@ -9,12 +10,13 @@ const state = {
   providerStatuses: {},
   provider: "codex",
   allowSavedApiKeys: true,
-  themeOverride: null,
+  themeOverride: storedThemeOverride(),
   resultComparison: [],
   resultExpanded: false,
   codexDetailsExpanded: false,
   promptExpanded: false,
   summarizeRunId: 0,
+  aiWaitTimers: {},
 };
 
 const els = {
@@ -85,6 +87,15 @@ function activeTheme() {
   return state.themeOverride || currentSystemTheme();
 }
 
+function storedThemeOverride() {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return stored === "dark" || stored === "light" ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const nextTheme = theme === "dark" ? "light" : "dark";
@@ -96,6 +107,11 @@ function applyTheme(theme) {
 
 function toggleTheme() {
   state.themeOverride = activeTheme() === "dark" ? "light" : "dark";
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, state.themeOverride);
+  } catch {
+    // Theme still changes for this page when storage is unavailable.
+  }
   applyTheme(state.themeOverride);
 }
 
@@ -360,13 +376,13 @@ async function analyzeFiles(files) {
   const selected = Array.from(files || []).filter(Boolean);
   if (!selected.length) return;
   if (selected.length > MAX_UPLOAD_FILES) {
-    showToast(`Upload up to ${MAX_UPLOAD_FILES} PowerPoint files at once.`);
+    showToast(`Upload up to ${MAX_UPLOAD_FILES} .pptx files at once.`);
     els.fileInput.value = "";
     return;
   }
   const unsupported = selected.find((file) => !isPowerPointFile(file));
   if (unsupported) {
-    showToast("Only .pptx and .ppt files are supported.");
+    showToast("Only .pptx files are supported.");
     els.fileInput.value = "";
     return;
   }
@@ -396,7 +412,7 @@ async function analyzeFiles(files) {
 }
 
 function isPowerPointFile(file) {
-  return /\.(pptx|ppt)$/i.test(file.name || "");
+  return /\.pptx$/i.test(file.name || "");
 }
 
 function normalizePresentations(data) {
@@ -477,8 +493,10 @@ function selectProvider(providerId) {
   els.keyField.classList.toggle("hidden", !provider.requiresKey);
   els.codexAuthPanel.classList.toggle("hidden", provider.id !== "codex");
   els.keyLabel.textContent = provider.keyLabel || "API key";
-  const envHint = provider.envKeys?.length ? provider.envKeys.join(" or ") : provider.envKey;
-  els.keyInput.placeholder = envHint ? `Optional if ${envHint} is saved or set` : "";
+  const keyStatus = state.providerStatuses[provider.id] || provider.keyStatus || {};
+  els.keyInput.placeholder = keyStatus.configured
+    ? "Optional: insert a different API key for this run"
+    : "Insert your API key here";
   els.keyInput.value = "";
   els.modelInput.innerHTML = "";
   provider.models.forEach((model) => {
@@ -672,7 +690,7 @@ async function summarizeConcurrently(presentations, runId) {
   const jobs = presentations.map(async (presentation) => {
     const result = await summarizePresentation(presentation, (job) => {
       if (runId !== state.summarizeRunId) return;
-      progressByPresentation.set(presentation.id, Number(job.percent || 0) / 100);
+      progressByPresentation.set(presentation.id, jobProgressFraction(presentation, job));
       const completedUnits = Array.from(progressByPresentation.values()).reduce((total, value) => total + value, 0);
       const title = job.title ? `${job.title}: ${presentation.filename}` : `Summarizing ${presentation.filename}`;
       const detail = `${Math.floor(completedUnits)} of ${presentations.length} complete · ${job.detail || "Working"}`;
@@ -754,10 +772,43 @@ async function pollSummarizeJob(jobId, presentation, onProgress) {
 }
 
 function setPresentationJobProgress(index, total, presentation, job) {
-  const jobFraction = Number(job.percent || 0) / 100;
+  const jobFraction = jobProgressFraction(presentation, job);
   const title = job.title ? `${job.title}: ${presentation.filename}` : `Summarizing ${presentation.filename}`;
   const detail = `${index} of ${total} complete · ${job.detail || "Working"}`;
   setSummaryProgress(index + jobFraction, total, title, detail);
+}
+
+function jobProgressFraction(presentation, job) {
+  const baseFraction = clamp(Number(job.percent || 0) / 100, 0, 1);
+  const timerKey = `${state.summarizeRunId}:${presentation.id}`;
+  const isWaitingForAi =
+    job.status === "running" &&
+    /^Sending to\s+/i.test(job.title || "") &&
+    baseFraction >= 0.3 &&
+    baseFraction < 0.66;
+
+  if (!isWaitingForAi) {
+    delete state.aiWaitTimers[timerKey];
+    return baseFraction;
+  }
+
+  const now = performance.now();
+  if (!state.aiWaitTimers[timerKey]) {
+    state.aiWaitTimers[timerKey] = {
+      startedAt: now,
+      baseFraction,
+    };
+  }
+
+  const timer = state.aiWaitTimers[timerKey];
+  const elapsed = now - timer.startedAt;
+  const capFraction = 0.65;
+  const easedFraction = capFraction - (capFraction - timer.baseFraction) * Math.exp(-elapsed / 18000);
+  return clamp(Math.max(baseFraction, easedFraction), baseFraction, capFraction - 0.002);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function delay(ms) {
@@ -782,6 +833,7 @@ function setSummaryProgress(completed, total, title, detail) {
 function hideSummaryProgress() {
   els.summaryProgress.classList.add("hidden");
   els.summaryProgressBar.style.width = "0%";
+  state.aiWaitTimers = {};
 }
 
 async function cancel() {
@@ -811,6 +863,7 @@ function resetAppState() {
   state.resultComparison = [];
   state.resultExpanded = false;
   state.codexDetailsExpanded = false;
+  state.aiWaitTimers = {};
   setPromptExpanded(false);
   els.keyInput.value = "";
   els.comparison.innerHTML = "";
@@ -902,19 +955,6 @@ function updateComparisonVisibility() {
   const rows = Array.from(els.comparison.querySelectorAll(".slide-pair"));
   rows.forEach((row) => row.classList.remove("is-hidden"));
   els.showAllButton.classList.add("hidden");
-
-  if (!rows.length || state.resultExpanded) return;
-
-  const visibleCount = comparisonRowsThatFit(rows);
-  rows.forEach((row, index) => {
-    row.classList.toggle("is-hidden", index >= visibleCount);
-  });
-
-  const hiddenCount = rows.length - visibleCount;
-  if (hiddenCount > 0) {
-    els.showAllLabel.textContent = `Show all ${rows.length} slides`;
-    els.showAllButton.classList.remove("hidden");
-  }
 }
 
 function comparisonRowsThatFit(rows) {

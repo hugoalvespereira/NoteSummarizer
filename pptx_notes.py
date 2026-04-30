@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import posixpath
 import re
-import shutil
-import subprocess
 import tempfile
 import zipfile
 import copy
@@ -56,46 +53,7 @@ def prepare_powerpoint(input_path: Path, work_dir: Path) -> Path:
     suffix = input_path.suffix.lower()
     if suffix == ".pptx":
         return input_path
-    if suffix == ".ppt":
-        return convert_ppt_to_pptx(input_path, work_dir)
-    raise PowerPointError("Only .pptx and .ppt files are supported.")
-
-
-def convert_ppt_to_pptx(input_path: Path, work_dir: Path) -> Path:
-    soffice = _find_soffice()
-    if not soffice:
-        raise PowerPointError(
-            ".ppt support requires LibreOffice or soffice on PATH. Convert this file to .pptx first, or install LibreOffice."
-        )
-
-    before = set(work_dir.glob("*.pptx"))
-    command = [
-        soffice,
-        "--headless",
-        "--convert-to",
-        "pptx",
-        "--outdir",
-        str(work_dir),
-        str(input_path),
-    ]
-    result = subprocess.run(
-        command,
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    after = set(work_dir.glob("*.pptx"))
-    created = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
-    expected = work_dir / f"{input_path.stem}.pptx"
-    if expected.exists():
-        return expected
-    if created:
-        return created[0]
-
-    detail = (result.stderr or result.stdout or "LibreOffice conversion failed.").strip()
-    raise PowerPointError(detail)
+    raise PowerPointError("Only .pptx files are supported.")
 
 
 def inspect_pptx(pptx_path: Path) -> dict:
@@ -189,17 +147,6 @@ def _slide_dict_for_dataclass(slide: dict) -> dict:
         "has_notes_slide": slide.get("has_notes_slide", False),
         "can_write": slide.get("can_write", False),
     }
-
-
-def _find_soffice() -> str | None:
-    for name in ("soffice", "libreoffice"):
-        found = shutil.which(name)
-        if found:
-            return found
-    mac_path = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
-    if mac_path.exists():
-        return str(mac_path)
-    return None
 
 
 def _presentation_slide_paths(zf: zipfile.ZipFile) -> list[str]:

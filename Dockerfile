@@ -14,7 +14,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       git \
-      libreoffice \
       python3 \
       python-is-python3 \
     && npm install -g @openai/codex \

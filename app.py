@@ -260,8 +260,8 @@ class AppHandler(BaseHTTPRequestHandler):
         for index, upload in enumerate(uploads, start=1):
             filename = _safe_filename(upload.get("filename") or f"presentation-{index}.pptx")
             suffix = Path(filename).suffix.lower()
-            if suffix not in {".pptx", ".ppt"}:
-                raise ValueError("Only .pptx and .ppt files are supported.")
+            if suffix != ".pptx":
+                raise ValueError("Only .pptx files are supported.")
 
             deck_dir = session_dir / f"presentation-{index}"
             deck_dir.mkdir(parents=True, exist_ok=True)

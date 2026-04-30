@@ -75,6 +75,40 @@ body::before {
     var(--paper);
 }
 
+@keyframes fade-lift {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes soft-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes progress-sheen {
+  from {
+    transform: translateX(-120%);
+  }
+
+  to {
+    transform: translateX(260%);
+  }
+}
+
 button,
 input,
 select,
@@ -90,12 +124,13 @@ a {
 .shell {
   position: relative;
   display: grid;
-  width: min(1040px, calc(100% - 40px));
+  width: min(1180px, calc(100% - 40px));
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0 auto;
   padding: 44px 0;
   align-content: start;
+  grid-template-rows: auto auto 1fr auto;
 }
 
 .shell::after {
@@ -170,9 +205,22 @@ a {
 }
 
 .shell[data-view="upload"] {
-  align-content: center;
+  align-content: stretch;
+  grid-template-rows: minmax(80px, 1fr) auto auto minmax(40px, 1fr) auto;
   padding-top: 28px;
   padding-bottom: 84px;
+}
+
+.shell[data-view="upload"] .topbar {
+  grid-row: 2;
+}
+
+.shell[data-view="upload"] #upload-view {
+  grid-row: 3;
+}
+
+.shell[data-view="upload"] .home-credit {
+  grid-row: 5;
 }
 
 .topbar,
@@ -190,10 +238,7 @@ a {
   justify-content: center;
   margin-bottom: 40px;
   text-align: center;
-}
-
-.shell[data-view="upload"] .topbar {
-  margin-bottom: 40px;
+  animation: fade-lift 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .topbar > div {
@@ -282,6 +327,14 @@ h2 {
     background 160ms ease,
     box-shadow 160ms ease,
     transform 160ms ease;
+  animation: soft-pop 620ms 90ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.drop-zone:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  box-shadow: var(--shadow);
+  transform: translateY(-3px);
 }
 
 .drop-zone input {
@@ -300,16 +353,43 @@ h2 {
 }
 
 .drop-mark {
-  display: grid;
+  position: relative;
+  display: flex;
   width: 44px;
   height: 44px;
-  place-items: center;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--line);
   border-radius: 50%;
   background: var(--surface-quiet);
   color: var(--accent);
-  font-size: 26px;
-  line-height: 1;
+  font-size: 0;
+  line-height: 0;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    color 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.drop-mark::before,
+.drop-mark::after {
+  position: absolute;
+  width: 16px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  content: "";
+}
+
+.drop-mark::after {
+  transform: rotate(90deg);
+}
+
+.drop-zone:hover .drop-mark {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-quiet));
+  transform: rotate(90deg) scale(1.04);
 }
 
 .drop-title {
@@ -330,21 +410,20 @@ h2 {
 }
 
 .home-credit {
-  position: absolute;
-  right: 0;
-  bottom: 24px;
-  left: 0;
+  position: static;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
+  align-self: end;
+  margin: 28px auto 0;
   color: var(--muted);
   font-size: 12px;
   font-weight: 650;
 }
 
-.shell:not([data-view="upload"]) .home-credit {
-  display: none;
+.shell[data-view="upload"] .home-credit {
+  margin: 0;
 }
 
 .home-credit a {
@@ -396,10 +475,11 @@ h2 {
 
 #setup-view {
   display: grid;
-  width: min(100%, 860px);
+  width: min(100%, 1060px);
   margin: 0 auto;
   gap: 24px;
   padding: 24px;
+  animation: soft-pop 500ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .metrics {
@@ -413,12 +493,21 @@ h2 {
   min-height: 126px;
   padding: 24px 26px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border: 1px solid transparent;
   border-radius: 8px;
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--accent) 9%, transparent), transparent 58%),
     var(--surface);
   box-shadow: 0 14px 38px rgba(28, 29, 31, 0.055);
+  transition:
+    background 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.metrics div:hover {
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.08);
+  transform: translateY(-2px);
 }
 
 .metrics span {
@@ -603,17 +692,30 @@ h2 {
 
 .provider-group > label > span {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
   min-height: 42px;
   align-items: center;
   justify-content: center;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 6px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 760;
   text-align: center;
+  white-space: nowrap;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.provider-group > label > span:hover {
+  color: var(--ink);
+  transform: translateY(-1px);
 }
 
 .provider-group input:checked + .provider-option {
@@ -625,8 +727,7 @@ h2 {
 
 .provider-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .provider-speed {
@@ -634,8 +735,8 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
-  padding: 2px 6px;
-  font-size: 10px;
+  padding: 2px 5px;
+  font-size: 9px;
   font-weight: 780;
   line-height: 1;
   text-transform: uppercase;
@@ -655,9 +756,9 @@ h2 {
   flex: 0 0 auto;
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 2px 6px;
+  padding: 2px 5px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 780;
   line-height: 1;
   text-transform: uppercase;
@@ -803,6 +904,20 @@ h2 {
   gap: 8px;
 }
 
+.provider-setup-actions a.ghost-button {
+  min-height: auto;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  padding-inline: 4px;
+}
+
+.provider-setup-actions a.ghost-button:hover {
+  border-color: transparent;
+  background: transparent;
+  text-decoration: underline;
+}
+
 .prompt-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -911,12 +1026,23 @@ select {
 }
 
 .progress-track span {
+  position: relative;
   display: block;
   width: 0%;
   height: 100%;
+  overflow: hidden;
   border-radius: inherit;
   background: var(--accent);
-  transition: width 220ms ease;
+  transition: width 680ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: width;
+}
+
+.progress-track span::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.34), transparent);
+  content: "";
+  animation: progress-sheen 1.7s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 input:focus,
@@ -1008,6 +1134,7 @@ button:disabled {
   width: min(100%, 1040px);
   margin: 0 auto;
   gap: 18px;
+  animation: fade-lift 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .result-head {
@@ -1033,6 +1160,17 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--line);
+  animation: fade-lift 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.slide-pair:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-soft);
+  transform: translateY(-1px);
 }
 
 .slide-pair.is-hidden {
@@ -1170,6 +1308,18 @@ button:disabled {
   background: var(--surface);
   box-shadow: var(--shadow-soft);
   padding: 20px;
+  animation: fade-lift 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.guide-card:hover,
+.guide-note:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+  transform: translateY(-2px);
 }
 
 .guide-card h2,
@@ -1224,7 +1374,7 @@ button:disabled {
   }
 
   .shell[data-view="upload"] {
-    align-content: center;
+    align-content: stretch;
     padding-top: 20px;
     padding-bottom: 72px;
   }
@@ -1356,5 +1506,16 @@ button:disabled {
   .tagline {
     max-width: 320px;
     font-size: 15px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
   }
 }
